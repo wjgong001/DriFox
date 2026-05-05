@@ -888,11 +888,12 @@ class DiffHtmlGenerator:
                     old_lines = normalize_lines(old_content)
                     new_lines = normalize_lines(new_content)
 
+                    abs_path = str(Path(current_path).resolve())
                     diff = difflib.unified_diff(
                         old_lines,
                         new_lines,
-                        fromfile=filename,
-                        tofile=filename,
+                        fromfile=abs_path,
+                        tofile=abs_path,
                         lineterm="\n",
                     )
 

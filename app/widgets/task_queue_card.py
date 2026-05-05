@@ -43,9 +43,16 @@ class TaskQueueCard(QFrame):
         if system is None:
             self._task_system = None
             return
-            
-        # 检查是否是有效的 TaskWatcherSystem
-        if hasattr(system, 'enqueue_task') and hasattr(system, '_queue') and hasattr(system, '_task_engine'):
+        
+        # 检查是否是有效的 TaskWatcherSystem（必须有这些属性）
+        is_valid = (
+            hasattr(system, 'enqueue_task') and 
+            hasattr(system, '_queue') and 
+            hasattr(system, '_task_engine') and
+            hasattr(system, 'get_queue_stats')
+        )
+        
+        if is_valid:
             self._task_system = system
         else:
             from loguru import logger

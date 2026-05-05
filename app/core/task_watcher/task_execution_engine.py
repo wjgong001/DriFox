@@ -459,11 +459,45 @@ class TaskChatEngine:
     ) -> bool:
         """发送消息"""
         from app.core.chat_engine import ChatEngine
+        from app.core.agent import AgentManager
         
         # 获取模型配置
         model_config = {}
         if self._main_widget and hasattr(self._main_widget, '_get_current_model_config'):
             model_config = self._main_widget._get_current_model_config()
+        
+        # 如果没有配置，尝试从 Settings 获取
+        if not model_config:
+            try:
+                from app.utils.config import Settings
+                setting = Settings.get_instance()
+                saved_providers = setting.llm_saved_providers.value or {}
+                if saved_providers:
+                    first_provider = list(saved_providers.keys())[0]
+                    model_config = saved_providers[first_provider]
+            except Exception:
+                pass
+        
+        # 如果还是没有，使用默认配置
+        if not model_config:
+            from loguru import logger
+            logger.warning("[TaskChatEngine] 未找到 LLM 配置，使用默认配置")
+            model_config = {
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "api_key": "sk-dummy",
+                "base_url": "https://api.openai.com/v1",
+            }
+        
+        # 获取 agent_manager
+        agent_manager = None
+        if self._main_widget:
+            agent_manager = getattr(self._main_widget, '_agent_manager', None)
+        
+        # 如果没有 agent_manager，创建一个新的
+        if agent_manager is None:
+            agent_manager = AgentManager()
+            logger.info("[TaskChatEngine] 创建新的 AgentManager")
         
         # 创建 ChatEngine
         engine = ChatEngine(
@@ -471,7 +505,7 @@ class TaskChatEngine:
             get_model_config=lambda: model_config,
             get_context_provider=lambda: None,
             tool_executor=self._tool_executor,
-            agent_manager=getattr(self._main_widget, '_agent_manager', None) if self._main_widget else None,
+            agent_manager=agent_manager,
             get_chat_cards=None,  # 不触发 UI
             get_memory_context=getattr(self._main_widget, '_build_memory_context_for_engine', None) if self._main_widget else None,
             worker_callbacks={
