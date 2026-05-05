@@ -18,6 +18,27 @@ from app.core.agent import (
 )
 from app.core.context_manager import ContextManager
 
+# TaskWatcher 模块
+from app.core.task_watcher import (
+    TaskWatcherSystem,
+    TaskConfig,
+    TaskConfigStore,
+    TaskQueue,
+    TaskExecutor,
+    TaskWatcher,
+    TaskScheduler,
+    OutputHandler,
+    TaskParser,
+    TaskParseError,
+    TriggerMode,
+    OutputMode,
+    SessionMode,
+    QueueStatus,
+    TaskResult,
+    get_engine_scheduler,
+    EngineScheduler,
+)
+
 __all__ = [
     "ChatEngine",
     "ToolExecutor",
@@ -26,4 +47,22 @@ __all__ = [
     "AgentManager",
     "create_agent_manager",
     "ContextManager",
+    # TaskWatcher
+    "TaskWatcherSystem",
+    "TaskConfig",
+    "TaskConfigStore",
+    "TaskQueue",
+    "TaskExecutor",
+    "TaskWatcher",
+    "TaskScheduler",
+    "OutputHandler",
+    "TaskParser",
+    "TaskParseError",
+    "TriggerMode",
+    "OutputMode",
+    "SessionMode",
+    "QueueStatus",
+    "TaskResult",
+    "get_engine_scheduler",
+    "EngineScheduler",
 ]

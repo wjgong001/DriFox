@@ -12,6 +12,7 @@ ICON_NAME_TO_FILE = {
     "Ollama": "Ollama.svg",
     "qwen": "qwen.svg",
     "siliconflow": "siliconflow.png",
+    "任务队列": "任务队列.svg",
     "分支": "分支.svg",
     "复制": "复制.svg",
     "大模型": "大模型.svg",

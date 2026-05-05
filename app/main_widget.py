@@ -311,12 +311,10 @@ class OpenAIChatToolWindow(ToolWindow):
             "permission_approval_requested", self._on_permission_approval_requested
         )
 
-        # 初始化子智能体日志存储（在 ChatEngine 之后）
-        self._init_sub_agent_log_store()
-
         self._initialize_history_manager()
-
-    def _init_sub_agent_log_store(self):
+        
+        # 初始化 TaskWatcher 任务观察者系统
+        self._init_task_watcher()
         """初始化子智能体日志存储"""
         from app.core.sub_agent_log_store import SubAgentLogStore
         import os
@@ -333,6 +331,51 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # # 自动启动 LLM API 服务
         # self._init_llm_api_service()
+
+    def _init_task_watcher(self):
+        """初始化 TaskWatcher 任务观察者系统"""
+        from app.core.task_watcher import TaskWatcherSystem, get_engine_scheduler
+        
+        try:
+            # 获取调度器
+            scheduler = get_engine_scheduler()
+            
+            # 注册当前窗口的引擎
+            canvas_name = getattr(self.homepage, "workflow_name", "default") or "default"
+            engine_id = f"widget_{id(self)}"  # 使用对象 ID 作为唯一标识
+            
+            scheduler.register_engine(
+                engine_id=engine_id,
+                chat_engine=self._chat_engine,
+                session_manager=self.session_manager,
+                project=self._current_project
+            )
+            
+            # 初始化或获取 TaskWatcherSystem
+            if not hasattr(self, '_task_watcher') or self._task_watcher is None:
+                self._task_watcher = TaskWatcherSystem(scheduler=scheduler)
+                
+                # 设置完成回调
+                self._task_watcher.set_callback("task_completed", self._on_task_watcher_completed)
+                self._task_watcher.set_callback("task_failed", self._on_task_watcher_failed)
+                
+                # 启动系统
+                self._task_watcher.start()
+                logger.info(f"[LLMChatter] TaskWatcher 系统启动完成")
+            
+            logger.info(f"[LLMChatter] 注册引擎到调度器: {engine_id}, project={self._current_project}")
+        except Exception as e:
+            logger.error(f"[LLMChatter] TaskWatcher 初始化失败: {e}")
+    
+    def _on_task_watcher_completed(self, config, result):
+        """任务完成回调"""
+        from loguru import logger
+        logger.info(f"[TaskWatcher] 任务完成: {config.name}, success={result.success}")
+    
+    def _on_task_watcher_failed(self, config, error):
+        """任务失败回调"""
+        from loguru import logger
+        logger.error(f"[TaskWatcher] 任务失败: {config.name}, error={error}")
 
     def _init_llm_api_service(self):
         """初始化 LLM API 服务"""
@@ -397,6 +440,18 @@ class OpenAIChatToolWindow(ToolWindow):
             self._settings_popup.hide()
         else:
             self._settings_popup.show()
+
+    def _toggle_task_queue_card(self):
+        """切换任务队列卡片的显示"""
+        if self._task_queue_card.isVisible():
+            self._task_queue_card.hide()
+        else:
+            # 确保 task_watcher 已初始化
+            if hasattr(self, '_task_watcher') and self._task_watcher:
+                self._task_queue_card.set_task_system(self._task_watcher)
+            # 刷新显示
+            self._task_queue_card.refresh()
+            self._task_queue_card.show()
 
     def _open_api_docs(self):
         """打开 API 文档页面"""
@@ -840,6 +895,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_card.content_layout.addWidget(self._history_popup_card)
         self._history_card.setVisible(False)
         layout.addWidget(self._history_card)
+        
+        # 任务队列卡片
+        from app.widgets.task_queue_card import TaskQueueCard
+        self._task_queue_card = TaskQueueCard(self)
+        self._task_queue_card.setFixedHeight(300)
+        self._task_queue_card.setVisible(False)
+        layout.addWidget(self._task_queue_card)
 
         self.node_preview = ConversationNodePreview(self)
         self.node_preview.nodeClicked.connect(self._on_node_preview_clicked)
@@ -932,6 +994,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self.memory_btn.setToolTip("长期记忆管理")
         self.memory_btn.clicked.connect(self._show_soul_memory)
         capsule_layout.addWidget(self.memory_btn)
+        
+        # 任务队列按钮
+        self.task_queue_btn = TransparentToolButton(get_icon("任务队列"), self._toolbar_capsule)
+        self.task_queue_btn.setFixedSize(26, 26)
+        self.task_queue_btn.setToolTip("任务队列管理")
+        self.task_queue_btn.clicked.connect(self._toggle_task_queue_card)
+        capsule_layout.addWidget(self.task_queue_btn)
 
         # 历史按钮
         self.history_btn = TransparentToolButton(FluentIcon.HISTORY, self._toolbar_capsule)
