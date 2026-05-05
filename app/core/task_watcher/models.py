@@ -113,6 +113,7 @@ class ContextConfig:
     session_id: Optional[str] = None
     agent: str = "plan"
     reference_files: List[str] = field(default_factory=list)
+    project: Optional[str] = None  # 任务会话保存到的 project
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ContextConfig":
@@ -128,6 +129,7 @@ class ContextConfig:
             session_id=data.get("session_id"),
             agent=data.get("agent", "plan"),
             reference_files=data.get("reference_files", []),
+            project=data.get("project"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -137,6 +139,7 @@ class ContextConfig:
             "session_id": self.session_id,
             "agent": self.agent,
             "reference_files": self.reference_files,
+            "project": self.project,
         }
 
 

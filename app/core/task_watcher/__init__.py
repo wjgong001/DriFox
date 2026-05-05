@@ -31,6 +31,7 @@ from .watcher import TaskWatcher, TaskFileHandler
 from .scheduler import TaskScheduler
 from .output_handler import OutputHandler
 from .engine_scheduler import EngineScheduler, get_engine_scheduler, EngineInfo
+from .task_execution_engine import TaskExecutionEngine, get_task_execution_engine
 from .system import TaskWatcherSystem
 
 __all__ = [
@@ -65,8 +66,11 @@ __all__ = [
     "EngineScheduler",
     "EngineInfo",
     "get_engine_scheduler",
+    # 任务执行引擎（使用独立环境）
+    "TaskExecutionEngine",
+    "get_task_execution_engine",
     # 系统
     "TaskWatcherSystem",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

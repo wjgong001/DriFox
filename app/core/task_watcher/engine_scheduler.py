@@ -51,7 +51,7 @@ class EngineScheduler:
     def __init__(self):
         self._engines: Dict[str, EngineInfo] = {}  # engine_id -> EngineInfo
         self._project_engines: Dict[str, List[str]] = {}  # project -> [engine_id, ...]
-        self._default_project = "TaskWatcher"
+        self._default_project = "任务执行"
         self._callback: Optional[Callable] = None
         
         # 默认分配策略：优先使用空闲引擎，其次使用最近未使用的

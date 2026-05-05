@@ -351,9 +351,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 project=self._current_project
             )
             
-            # 初始化或获取 TaskWatcherSystem
+            # 初始化或获取 TaskWatcherSystem（传入 main_widget 以便创建隔离执行环境）
             if not hasattr(self, '_task_watcher') or self._task_watcher is None:
-                self._task_watcher = TaskWatcherSystem(scheduler=scheduler)
+                self._task_watcher = TaskWatcherSystem(
+                    scheduler=scheduler,
+                    main_widget=self,  # 传入自身用于创建隔离上下文
+                )
                 
                 # 设置完成回调
                 self._task_watcher.set_callback("task_completed", self._on_task_watcher_completed)

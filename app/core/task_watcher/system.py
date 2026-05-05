@@ -5,6 +5,7 @@ TaskWatcher 系统门面
 """
 
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
 from loguru import logger
@@ -13,29 +14,30 @@ from .database import Database, DRIFOX_DIR
 from .config_store import TaskConfigStore
 from .parser import TaskParser, TaskParseError
 from .queue import TaskQueue
-from .executor import TaskExecutor
 from .watcher import TaskWatcher
 from .scheduler import TaskScheduler
 from .output_handler import OutputHandler
 from .engine_scheduler import get_engine_scheduler, EngineScheduler
 from .models import TaskConfig, TaskResult, TriggerMode, QueueStatus
+from .task_execution_engine import TaskExecutionEngine, get_task_execution_engine
 
 
 class TaskWatcherSystem:
     """TaskWatcher 系统门面
     
     整合所有组件，提供统一的入口
-    支持多 ChatEngine 调度，自动分配空闲引擎
+    使用独立的 TaskExecutionEngine 执行任务，不复用现有 ChatEngine
     """
 
     # 默认任务项目名称
-    DEFAULT_TASK_PROJECT = "TaskWatcher"
+    DEFAULT_TASK_PROJECT = "任务执行"
     
     def __init__(
         self,
         scheduler: Optional[EngineScheduler] = None,
         event_bus: Any = None,
-        db_path: Optional[str] = None
+        db_path: Optional[str] = None,
+        main_widget=None,
     ):
         """初始化 TaskWatcher 系统
         
@@ -43,14 +45,16 @@ class TaskWatcherSystem:
             scheduler: 引擎调度器（默认使用全局调度器）
             event_bus: 事件总线（可选）
             db_path: 数据库路径（可选）
+            main_widget: UI 主窗口（用于创建隔离的执行环境）
         """
         # 配置 - 使用项目本地目录
         self._watch_root: Optional[str] = os.path.join(DRIFOX_DIR, "tasks")
+        self._main_widget = main_widget
         
         # 初始化数据库
         self._db = Database.get_instance(db_path)
         
-        # 初始化引擎调度器
+        # 初始化引擎调度器（备用）
         self._engine_scheduler = scheduler or get_engine_scheduler()
         self._engine_scheduler.set_default_project(self.DEFAULT_TASK_PROJECT)
         
@@ -62,12 +66,8 @@ class TaskWatcherSystem:
         self._scheduler = TaskScheduler(self._config_store)
         self._parser = TaskParser()
         
-        # 初始化执行器
-        self._executor = TaskExecutor(
-            scheduler=self._engine_scheduler,
-            event_bus=event_bus,
-            db=self._db
-        )
+        # 初始化任务执行引擎（使用独立环境）
+        self._task_engine = get_task_execution_engine(main_widget)
         
         # 系统状态
         self._running = False
@@ -81,6 +81,11 @@ class TaskWatcherSystem:
         
         # 设置回调
         self._setup_callbacks()
+    
+    @property
+    def task_engine(self) -> TaskExecutionEngine:
+        """获取任务执行引擎"""
+        return self._task_engine
 
     def _setup_callbacks(self) -> None:
         """设置内部回调"""
@@ -90,10 +95,11 @@ class TaskWatcherSystem:
         # 设置监听器回调
         self._watcher.set_callback(self._on_file_detected)
         
-        # 设置执行器回调
-        self._executor.set_callback("task_started", self._on_task_started)
-        self._executor.set_callback("task_completed", self._on_task_completed)
-        self._executor.set_callback("task_failed", self._on_task_failed)
+        # 设置任务执行引擎回调
+        self._task_engine.set_callback("task_started", self._on_task_started)
+        self._task_engine.set_callback("task_completed", self._on_task_completed)
+        self._task_engine.set_callback("task_failed", self._on_task_failed)
+        self._task_engine.set_callback("task_cancelled", self._on_task_cancelled)
 
     def _on_scheduled_trigger(self, config: TaskConfig) -> None:
         """定时任务触发回调
@@ -114,10 +120,18 @@ class TaskWatcherSystem:
         logger.info(f"[TaskWatcherSystem] 检测到任务文件: {file_path}")
         self.enqueue_task(config, trigger_type="file_change", source_file=file_path)
 
-    def _on_task_started(self, config: TaskConfig) -> None:
+    def _on_task_started(self, task_id: str, task_name: str, project: str) -> None:
         """任务开始回调"""
-        self._emit("task_started", config)
-        logger.debug(f"[TaskWatcherSystem] 任务开始: {config.id}")
+        # 找到对应的 config（从 pending_tasks 中查找）
+        config = None
+        for tid, qid in self._pending_tasks.items():
+            if tid == task_id:
+                config = self._config_store.get(task_id)
+                break
+        
+        if config:
+            self._emit("task_started", config)
+        logger.debug(f"[TaskWatcherSystem] 任务开始: {task_id}, project={project}")
 
     def _on_task_completed(self, config: TaskConfig, result: TaskResult) -> None:
         """任务完成回调
@@ -173,6 +187,22 @@ class TaskWatcherSystem:
         
         self._emit("task_failed", config, error)
         logger.error(f"[TaskWatcherSystem] 任务失败: {config.id}, error={error}")
+        
+        # 继续处理队列
+        self._process_queue()
+
+    def _on_task_cancelled(self, task_id: str) -> None:
+        """任务取消回调
+        
+        Args:
+            task_id: 任务 ID
+        """
+        queue_id = self._pending_tasks.pop(task_id, None)
+        if queue_id:
+            self._queue.update_status(queue_id, QueueStatus.FAILED, "任务已取消")
+        
+        self._emit("task_cancelled", task_id)
+        logger.info(f"[TaskWatcherSystem] 任务已取消: {task_id}")
         
         # 继续处理队列
         self._process_queue()
@@ -332,7 +362,7 @@ class TaskWatcherSystem:
         return queue_id
 
     def execute_now(self, file_path: str, callback: Optional[Callable[[TaskResult], None]] = None) -> None:
-        """立即执行任务文件（事件驱动）
+        """立即执行任务文件
         
         Args:
             file_path: 任务文件路径
@@ -348,15 +378,31 @@ class TaskWatcherSystem:
             
             config.source_file = file_path
             
-            # 设置完成回调
-            if callback:
-                def on_completed(cfg: TaskConfig, result: TaskResult):
-                    callback(result)
-                self.set_callback("task_completed", on_completed)
-            
-            # 直接执行（不入队，使用回调收集结果）
+            # 直接执行（使用 TaskExecutionEngine）
             self._pending_tasks[config.id] = -1  # -1 表示不在队列中
-            self._executor.execute(config)
+            
+            project = config.context.get("project") if config.context else None
+            agent = config.context.get("agent", "plan") if config.context else "plan"
+            
+            def on_result(result: str, success: bool):
+                task_result = TaskResultModel(
+                    success=success,
+                    task_id=config.id,
+                    output_content=result if success else None,
+                    error=None if success else result,
+                )
+                self._pending_tasks.pop(config.id, None)
+                if callback:
+                    callback(task_result)
+            
+            self._task_engine.execute_task(
+                task_id=config.id,
+                task_name=config.name or "未命名任务",
+                task_content=config.content or "",
+                project=project or self.DEFAULT_TASK_PROJECT,
+                agent=agent,
+                callback=on_result,
+            )
             
         except Exception as e:
             logger.error(f"[TaskWatcherSystem] 立即执行失败: {e}")
@@ -408,14 +454,47 @@ class TaskWatcherSystem:
             # 记录 pending 任务
             self._pending_tasks[config.id] = item.id
             
-            # 执行任务（事件驱动，不等待结果）
-            self._executor.execute(config, item.id)
+            # 使用独立的 TaskExecutionEngine 执行任务
+            project = config.context.project if hasattr(config.context, 'project') else None
+            agent = config.context.agent if hasattr(config.context, 'agent') else "plan"
+            
+            self._task_engine.execute_task(
+                task_id=config.id,
+                task_name=config.name or "未命名任务",
+                task_content=config.content or "",
+                project=project or self.DEFAULT_TASK_PROJECT,
+                agent=agent,
+                callback=lambda result, success: self._on_task_result(config, result, success),
+            )
             
         except Exception as e:
             logger.error(f"[TaskWatcherSystem] 处理队列失败: {e}")
         finally:
             # 立即重置，避免阻塞后续任务
             self._processing = False
+    
+    def _on_task_result(self, config: TaskConfig, result: str, success: bool) -> None:
+        """任务执行结果回调"""
+        from .models import TaskResult as TaskResultModel
+        
+        queue_id = self._pending_tasks.pop(config.id, None)
+        
+        task_result = TaskResultModel(
+            success=success,
+            task_id=config.id,
+            output_content=result if success else None,
+            error=None if success else result,
+        )
+        
+        if queue_id:
+            self._queue.update_status(
+                queue_id,
+                QueueStatus.COMPLETED if success else QueueStatus.FAILED,
+                task_result.error
+            )
+        
+        self._emit("task_completed", config, task_result)
+        logger.debug(f"[TaskWatcherSystem] 任务完成: {config.id}, success={success}")
 
     # ========== 配置管理 ==========
 
@@ -530,7 +609,7 @@ class TaskWatcherSystem:
         return {
             "pending": self._queue.get_pending_count(),
             "running": len(self._pending_tasks),
-            "scheduled": self._scheduler_component.scheduled_count,
+            "scheduled": self._scheduler.scheduled_count if hasattr(self._scheduler, 'scheduled_count') else 0,
         }
 
     def get_execution_logs(self, task_id: Optional[str] = None, limit: int = 100) -> list:
