@@ -2,6 +2,8 @@
 """
 工具执行器模块 - 统一处理各种工具调用
 """
+import threading
+import time
 from loguru import logger
 from typing import Dict, Optional, Callable
 
@@ -29,6 +31,9 @@ class ToolExecutor:
 
         # 文件操作记录器
         self._file_recorder: Optional[FileOperationRecorder] = None
+        
+        # 有效标志：用于检查 ToolExecutor 是否仍然有效（UI 未关闭）
+        self._valid: bool = True
 
         self._initialize_builtin_tools()
 
@@ -59,15 +64,7 @@ class ToolExecutor:
         """检查 ToolExecutor 是否仍然有效（UI 未关闭）"""
         if self._builtin_tools is None:
             return False
-        # 检查 QObject 是否已被删除
-        try:
-            # 如果对象已删除，尝试访问 sip 会有异常
-            from PyQt5 import sip
-            if sip.isdeleted(self._builtin_tools):
-                return False
-        except Exception:
-            pass
-        return True
+        return self._valid
 
     @property
     def todo_list(self):
@@ -91,6 +88,9 @@ class ToolExecutor:
         彻底清理 ToolExecutor 的所有缓存，防止内存泄漏。
         应该在对话结束后或切换会话时调用。
         """
+        # 标记为无效
+        self._valid = False
+        
         # 清理 builtin_tools
         if self._builtin_tools:
             try:
@@ -474,13 +474,13 @@ class ToolExecutor:
         path = args.get("path", "")
         include = args.get("include")
         
-        # 使用 FileTools 的异步接口
+        # 使用 threading.Event 进行同步
         result_holder = [None]
-        finished = [False]
+        finished = threading.Event()
         
         def on_grep_done(result):
             result_holder[0] = result
-            finished[0] = True
+            finished.set()
         
         # 启动异步 grep
         self._builtin_tools._file_tools.grep_files(
@@ -490,38 +490,29 @@ class ToolExecutor:
             callback=on_grep_done
         )
         
-        # 使用定时器循环处理主线程事件，这样取消信号可以被处理
-        def wait_for_result():
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            
-            if finished[0]:
-                return
-            
+        # 等待完成，支持取消
+        while not finished.is_set():
             # 检查取消标志
             if cancelled_ref is not None and cancelled_ref[0]:
                 self._builtin_tools._file_tools.cancel()
                 result_holder[0] = ToolResult(False, error="用户中止")
-                finished[0] = True
-                return
-            
-            # 继续等待
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(50, wait_for_result)
-        
-        wait_for_result()
-        
-        # 等待完成
-        while not finished[0]:
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            import time
+                finished.set()
+                break
             time.sleep(0.05)
         
         return result_holder[0] if result_holder[0] else ToolResult(False, error="Grep failed")
 
     def _execute_webfetch_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
-        """异步执行网页抓取"""
+        """
+        异步执行网页抓取
+        
+        Args:
+            args: 工具参数
+            cancelled_ref: 取消标志引用 [bool]
+        
+        Returns:
+            ToolResult: 执行结果
+        """
         if not self._builtin_tools or not self._builtin_tools._web_tools:
             return ToolResult(False, error="WebTools not available")
         
@@ -529,76 +520,65 @@ class ToolExecutor:
         format = args.get("format", "markdown")
         max_chars = args.get("max_chars", 26000)
         
+        # 使用 threading.Event 进行同步
         result_holder = [None]
-        finished = [False]
+        finished = threading.Event()
         
         def on_fetch_done(result):
             result_holder[0] = result
-            finished[0] = True
+            finished.set()
         
         self._builtin_tools._web_tools.fetch_web(
             url=url, format=format, max_chars=max_chars,
             callback=on_fetch_done, cancelled_ref=cancelled_ref
         )
         
-        def wait_for_result():
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            if finished[0]: return
+        # 等待完成，支持取消
+        while not finished.is_set():
             if cancelled_ref is not None and cancelled_ref[0]:
                 result_holder[0] = ToolResult(False, error="用户中止")
-                finished[0] = True
-                return
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(50, wait_for_result)
-        
-        wait_for_result()
-        
-        while not finished[0]:
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            import time
+                finished.set()
+                break
             time.sleep(0.05)
         
         return result_holder[0] if result_holder[0] else ToolResult(False, error="WebFetch failed")
 
     def _execute_websearch_async(self, args: dict, cancelled_ref: list = None) -> ToolResult:
-        """异步执行网络搜索"""
+        """
+        异步执行网络搜索
+        
+        Args:
+            args: 工具参数
+            cancelled_ref: 取消标志引用 [bool]
+        
+        Returns:
+            ToolResult: 执行结果
+        """
         if not self._builtin_tools or not self._builtin_tools._web_tools:
             return ToolResult(False, error="WebTools not available")
         
         query = args.get("query", "")
         num_results = args.get("num_results", 10)
         
+        # 使用 threading.Event 进行同步
         result_holder = [None]
-        finished = [False]
+        finished = threading.Event()
         
         def on_search_done(result):
             result_holder[0] = result
-            finished[0] = True
+            finished.set()
         
         self._builtin_tools._web_tools.search_web(
             query=query, num_results=num_results,
             callback=on_search_done, cancelled_ref=cancelled_ref
         )
         
-        def wait_for_result():
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            if finished[0]: return
+        # 等待完成，支持取消
+        while not finished.is_set():
             if cancelled_ref is not None and cancelled_ref[0]:
                 result_holder[0] = ToolResult(False, error="用户中止")
-                finished[0] = True
-                return
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(50, wait_for_result)
-        
-        wait_for_result()
-        
-        while not finished[0]:
-            from PyQt5.QtWidgets import QApplication
-            QApplication.processEvents()
-            import time
+                finished.set()
+                break
             time.sleep(0.05)
         
         return result_holder[0] if result_holder[0] else ToolResult(False, error="WebSearch failed")
