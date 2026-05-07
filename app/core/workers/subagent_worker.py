@@ -6,11 +6,18 @@ DEPRECATED: 使用 PyQt5.QtCore.QThread，已被 async_subagent_worker.py 替代
 请使用 AsyncSubAgentExecutor
 """
 
+import re
+import json
+import time
+from typing import Dict, List, Any, Optional, Callable
+
 # DEPRECATED: PyQt5 依赖 - 迁移到 async_subagent_worker.py
 from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication, QObject
 from openai import OpenAI
+from loguru import logger
 
 from app.core.provider_profile import get_provider_profile
+from app.core.store.subagent_log_store import SubAgentLogStore
 
 
 # ========== 性能优化：预编译正则表达式 ==========
