@@ -10,13 +10,11 @@ from app.core.tool_executor import ToolExecutor
 from app.core.memory_manager import MemoryManagerCore
 from app.core.agent import Agent, AgentManager, create_agent_manager
 from app.core.workers import (
-    OpenAIChatWorker,
     AsyncOpenAIChatWorker,
-    SubAgentExecutor,
     AsyncSubAgentExecutor,
     SubAgentManager,
     TopicSummaryTask,
-    ShellExecutionTask,
+    execute_shell,
 )
 from app.core.store import SessionStore, SubAgentLogStore
 from app.core.message_content import (
@@ -76,13 +74,11 @@ __all__ = [
     "AgentManager",
     "create_agent_manager",
     # Worker
-    "OpenAIChatWorker",
     "AsyncOpenAIChatWorker",
-    "SubAgentExecutor",
     "AsyncSubAgentExecutor",
     "SubAgentManager",
     "TopicSummaryTask",
-    "ShellExecutionTask",
+    "execute_shell",
     # Store
     "SessionStore",
     "SubAgentLogStore",

@@ -29,7 +29,7 @@ from app.core.token_estimator import (
     estimate_tokens,
     count_messages_tokens,
 )
-from app.core.workers import OpenAIChatWorker, AsyncOpenAIChatWorker
+from app.core.workers import AsyncOpenAIChatWorker
 
 MAX_HISTORY_SNIPPET_CHARS = 1200
 RECENT_HISTORY_MIN_MESSAGES = 6
@@ -1046,64 +1046,30 @@ class ChatEngine:
             compaction_config = self._agent_manager.get_agent_config("compaction")
         session = self._session_manager.get_current_session()
 
-        # 根据配置选择使用哪种 worker
-        if self._use_async_worker:
-            # 使用无 PyQt 依赖的异步 worker
-            self._current_worker = AsyncOpenAIChatWorker(
-                messages=messages,
-                session_messages=session.get_context_messages() if session else [],
-                llm_config=llm_config,
-                tools=tools,
-                tool_executor=self._tool_executor,
-                tool_start_callback=self._callbacks.get("tool_call_sync_requested"),
-                permission_check_callback=self._check_tool_permission,
-                compaction_prompt=compaction_prompt,
-                compaction_config=compaction_config,
-            )
-            # 设置直接回调（无 PyQt worker 不使用信号）
-            self._current_worker.set_direct_callbacks({
-                "content_received": self._on_content_received,
-                "reasoning_content_received": self._on_reasoning_content_received,
-                "tool_call_started": self._on_tool_call_started,
-                "tool_result_received": self._on_tool_result_received,
-                "error_occurred": self._on_error,
-                "finished_with_content": self._on_worker_finished,
-                "finished_with_messages": self._on_worker_messages_updated,
-                "question_asked": self._on_question_asked,
-                "permission_approval_requested": self._on_permission_approval_requested,
-            })
-        else:
-            # 使用原始的 PyQt worker（向后兼容）
-            self._current_worker = OpenAIChatWorker(
-                messages=messages,
-                session_messages=session.get_context_messages() if session else [],
-                llm_config=llm_config,
-                tools=tools,
-                tool_executor=self._tool_executor,
-                tool_start_callback=self._callbacks.get("tool_call_sync_requested"),
-                permission_check_callback=self._check_tool_permission,
-                compaction_prompt=compaction_prompt,
-                compaction_config=compaction_config,
-            )
-            # API 模式：直接调用回调（不使用 Qt 信号-槽，避免跨线程事件循环问题）
-            # API 模式下 worker 运行在没有 Qt 事件循环的线程中，Qt 信号无法传递
-            if self._api_mode and self._worker_callbacks:
-                self._current_worker.set_direct_callbacks(self._worker_callbacks)
-            else:
-                # UI 模式：使用 Qt 信号-槽机制
-                self._current_worker.content_received.connect(self._on_content_received)
-                self._current_worker.reasoning_content_received.connect(self._on_reasoning_content_received)
-                self._current_worker.tool_call_started.connect(self._on_tool_call_started)
-                self._current_worker.tool_result_received.connect(self._on_tool_result_received)
-                self._current_worker.error_occurred.connect(self._on_error)
-                self._current_worker.finished_with_content.connect(self._on_worker_finished)
-                self._current_worker.finished_with_messages.connect(
-                    self._on_worker_messages_updated
-                )
-                self._current_worker.question_asked.connect(self._on_question_asked)
-                self._current_worker.permission_approval_requested.connect(
-                    self._on_permission_approval_requested
-                )
+        # 始终使用无 PyQt 依赖的异步 worker
+        self._current_worker = AsyncOpenAIChatWorker(
+            messages=messages,
+            session_messages=session.get_context_messages() if session else [],
+            llm_config=llm_config,
+            tools=tools,
+            tool_executor=self._tool_executor,
+            tool_start_callback=self._callbacks.get("tool_call_sync_requested"),
+            permission_check_callback=self._check_tool_permission,
+            compaction_prompt=compaction_prompt,
+            compaction_config=compaction_config,
+        )
+        # 设置直接回调（无 PyQt worker 不使用信号）
+        self._current_worker.set_direct_callbacks({
+            "content_received": self._on_content_received,
+            "reasoning_content_received": self._on_reasoning_content_received,
+            "tool_call_started": self._on_tool_call_started,
+            "tool_result_received": self._on_tool_result_received,
+            "error_occurred": self._on_error,
+            "finished_with_content": self._on_worker_finished,
+            "finished_with_messages": self._on_worker_messages_updated,
+            "question_asked": self._on_question_asked,
+            "permission_approval_requested": self._on_permission_approval_requested,
+        })
 
         self._current_worker.start()
         self._emit("stream_started")

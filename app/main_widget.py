@@ -159,6 +159,8 @@ class OpenAIChatToolWindow(ToolWindow):
     _window_active: bool = True
     _history_preview_messages: Optional[List[dict]] = None
     _history_preview_title: str = ""
+    _use_api_mode: bool = False  # API 模式开关，默认关闭（向后兼容）
+    _api_client = None  # API 客户端实例
     insertResponse = pyqtSignal(str)
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
@@ -286,6 +288,24 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置文件操作记录的会话上下文
         if self.backend.tool_executor:
             self.backend.set_session_context(self._current_session_id)
+        
+        # 初始化 API 客户端（可选模式，用于 API 调用而非直接调用 ChatEngine）
+        self._init_api_client()
+    
+    def _init_api_client(self):
+        """初始化 API 客户端
+        
+        当 _use_api_mode 为 True 时，使用 API 客户端连接 FastAPI 服务
+        """
+        from app.api_client import get_api_client
+        
+        # 获取或创建 API 客户端单例
+        self._api_client = get_api_client()
+        
+        # 设置 API 模式的回调
+        self._setup_api_callbacks()
+        
+        logger.info(f"[ApiClient] Initialized, api_mode={self._use_api_mode}")
 
     def _setup_engine_callbacks(self):
         """设置 ChatEngine 的回调"""
@@ -306,6 +326,75 @@ class OpenAIChatToolWindow(ToolWindow):
             "permission_approval_requested": self._on_permission_approval_requested,
         }
         self.backend.set_all_callbacks(callbacks)
+    
+    def _setup_api_callbacks(self):
+        """设置 API 客户端的回调
+        
+        当使用 API 模式时，API 返回的 SSE 事件会触发这些回调
+        """
+        if not self._api_client:
+            return
+        
+        callbacks = {
+            "started": self._on_api_stream_started,
+            "content": self._on_api_content_received,
+            "reasoning_content": self._on_api_reasoning_content_received,
+            "tool_call_started": self._on_api_tool_call_started,
+            "tool_result": self._on_api_tool_result_received,
+            "stream_finished": self._on_api_stream_finished,
+            "error": self._on_api_error,
+            "complete": self._on_api_complete,
+        }
+        self._api_client.set_callbacks(callbacks)
+    
+    def _on_api_stream_started(self, data: Dict[str, Any]):
+        """API 模式：流开始"""
+        self._is_streaming = True
+        self._accumulated_content = ""
+    
+    def _on_api_content_received(self, content: str):
+        """API 模式：收到内容片段"""
+        if self._current_assistant_card:
+            self._update_assistant_message(self._current_assistant_card, content)
+        
+        if not hasattr(self, "_accumulated_content"):
+            self._accumulated_content = ""
+        self._accumulated_content += content
+    
+    def _on_api_reasoning_content_received(self, content: str):
+        """API 模式：收到思考内容"""
+        if self._current_assistant_card:
+            self._current_assistant_card.append_reasoning(content)
+    
+    def _on_api_tool_call_started(self, data: Dict[str, Any]):
+        """API 模式：工具调用开始"""
+        tool_call_id = data.get("tool_call_id", "")
+        tool_name = data.get("tool_name", "")
+        arguments = data.get("arguments", {})
+        
+        # 复用原有的工具调用处理逻辑
+        self._on_tool_call_started(tool_call_id, tool_name, arguments)
+    
+    def _on_api_tool_result_received(self, data: Dict[str, Any]):
+        """API 模式：收到工具结果"""
+        tool_call_id = data.get("tool_call_id", "")
+        tool_name = data.get("tool_name", "")
+        result = data.get("result", {})
+        
+        # 复用原有的工具结果处理逻辑
+        self._on_tool_result_received(tool_call_id, tool_name, {}, result)
+    
+    def _on_api_stream_finished(self, response: str):
+        """API 模式：流结束"""
+        self._on_stream_finished(response)
+    
+    def _on_api_error(self, error: str):
+        """API 模式：发生错误"""
+        self._on_engine_error(error)
+    
+    def _on_api_complete(self, data: Dict[str, Any]):
+        """API 模式：响应完成"""
+        pass  # stream_finished 已处理大部分清理工作
     
     def _init_sub_agent_manager(self):
         """初始化子智能体管理器"""
@@ -3904,15 +3993,60 @@ class OpenAIChatToolWindow(ToolWindow):
         if session and self._tool_executor:
             self._tool_executor.set_session_context(session.session_id)
 
-        # 如果 send_message 返回 False（通常是 LLM 配置无效），回滚 UI 状态
-        if not self.backend.send_message_to_engine(user_text, context_params):
+        self._current_assistant_card = assistant_card
+
+        # 根据模式选择发送方式
+        if self._use_api_mode and self._api_client:
+            # API 模式：通过 HTTP 调用 FastAPI 服务
+            self._send_message_via_api(user_text, context_params, session)
+        else:
+            # 原有模式：直接调用 ChatEngine
+            # 如果 send_message 返回 False（通常是 LLM 配置无效），回滚 UI 状态
+            if not self.backend.send_message_to_engine(user_text, context_params):
+                self._is_streaming = False
+                self._toggle_send_stop(False)
+                assistant_card.deleteLater()
+                return
+        
+        self._maybe_generate_topic_summary()
+    
+    def _send_message_via_api(self, user_text: str, context_params: Dict, session):
+        """通过 API 发送消息
+        
+        Args:
+            user_text: 用户消息
+            context_params: 上下文参数
+            session: 当前会话
+        """
+        if not self._api_client:
+            logger.error("[ApiClient] API client not initialized")
             self._is_streaming = False
             self._toggle_send_stop(False)
-            assistant_card.deleteLater()
+            if self._current_assistant_card:
+                self._current_assistant_card.deleteLater()
             return
-
-        self._current_assistant_card = assistant_card
-        self._maybe_generate_topic_summary()
+        
+        # 确保服务正在运行
+        if not self._api_client.ensure_service_running():
+            logger.error("[ApiClient] Failed to start API service")
+            self._on_engine_error("API 服务启动失败，请检查配置")
+            return
+        
+        # 设置当前会话 ID
+        session_id = session.session_id if session else None
+        if session_id:
+            self._api_client.set_current_session_id(session_id)
+        
+        # 启动异步流式请求
+        try:
+            self._api_client.chat_stream(
+                session_id=session_id,
+                message=user_text,
+                context_params=context_params,
+            )
+        except Exception as e:
+            logger.exception(f"[ApiClient] Failed to send message: {e}")
+            self._on_engine_error(f"API 请求失败: {e}")
 
     def _on_stream_started(self):
         self._is_streaming = True
@@ -4450,7 +4584,7 @@ class OpenAIChatToolWindow(ToolWindow):
             long_term_memory=long_term_memory,
             existing_memories=existing_memories,
         )
-        self._gen_thread_pool.start(task)
+        task.start()
 
     def _on_topic_summary_generated(self, result, error: str = None):
         if error:
