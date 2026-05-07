@@ -18,6 +18,7 @@ from loguru import logger
 
 from app.core.provider_profile import get_provider_profile
 from app.core.store.subagent_log_store import SubAgentLogStore
+from app.tools.result import ToolResult
 
 
 # ========== 性能优化：预编译正则表达式 ==========
