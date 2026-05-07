@@ -1,7 +1,12 @@
+# -*- coding: utf-8 -*-
+"""
+会话管理模块 - 纯 Python 实现
+不依赖 PyQt，支持前后端分离
+"""
+
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
-from PyQt5.QtCore import QObject
 
 from app.core.message_content import consolidate_messages
 
@@ -157,9 +162,14 @@ class ChatSession:
         return session
 
 
-class SessionManager(QObject):
+class SessionManager:
+    """
+    会话管理器 - 纯 Python 实现
+    
+    不依赖 PyQt，可用于任何前端（桌面/Web/移动端）
+    """
+    
     def __init__(self):
-        super().__init__()
         self.sessions: List[ChatSession] = []
         self.current_index = -1
 

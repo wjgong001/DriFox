@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
 """
 子智能体执行器 - 独立运行子智能体任务，避免共享超长上下文
+
+使用标准线程替代 QThread，支持前后端分离
 """
 
 import json
 import re
 import time
+import threading
 from typing import Dict, List, Optional, Any, Callable
 
 from loguru import logger
 
 from app.tools.result import ToolResult
 from app.core.store import SubAgentLogStore
+from app.core.event_bus import Signal, get_event_bus
 
-from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication, QObject
 from openai import OpenAI
 
 from app.core.provider_profile import get_provider_profile
@@ -23,14 +26,12 @@ from app.core.provider_profile import get_provider_profile
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?")  # 过滤思考内容
 
 
-class SubAgentExecutor(QThread):
-    """子智能体执行器 - 独立线程运行子智能体任务"""
-
-    finished_with_result = pyqtSignal(str, str)  # task_id, result
-    error_occurred = pyqtSignal(str, str)  # task_id, error
-    progress_updated = pyqtSignal(str, str)  # task_id, message
-    tool_call_started = pyqtSignal(str, str, dict)  # task_id, tool_name, args
-    tool_result_received = pyqtSignal(str, str, str, bool)  # task_id, tool_name, result, success
+class SubAgentExecutor(threading.Thread):
+    """
+    子智能体执行器 - 独立线程运行子智能体任务
+    
+    使用标准线程替代 QThread，支持前后端分离
+    """
 
     def __init__(
         self,
@@ -42,8 +43,21 @@ class SubAgentExecutor(QThread):
         tool_executor: Any = None,
         parent_context: str = "",
         is_subagent_call: bool = True,  # 标记是否为被主智能体调用（通过 task_batch）
+        event_bus=None,
     ):
-        super().__init__()
+        super().__init__(daemon=True)
+        
+        # 事件总线
+        self._event_bus = event_bus or get_event_bus()
+        
+        # ========== Signal 定义（兼容 PyQt 风格 API）==========
+        self.finished_with_result = Signal(str, str)  # task_id, result
+        self.error_occurred = Signal(str, str)  # task_id, error
+        self.progress_updated = Signal(str, str)  # task_id, message
+        self.tool_call_started = Signal(str, str, dict)  # task_id, tool_name, args
+        self.tool_result_received = Signal(str, str, str, bool)  # task_id, tool_name, result, success
+        
+        # 初始化属性
         self.task_id = task_id
         self.agent_name = agent_name
         self.task_description = task_description
@@ -575,15 +589,23 @@ class SubAgentExecutor(QThread):
             return result[:3000]
 
 
-class SubAgentManager(QObject):
-    """子智能体管理器 - 管理子智能体任务分发"""
+class SubAgentManager:
+    """
+    子智能体管理器 - 管理子智能体任务分发
+    
+    纯 Python 实现，不依赖 PyQt，支持前后端分离
+    """
 
-    task_started = pyqtSignal(str, str, str)  # task_id, agent_name, task_description
-    task_finished = pyqtSignal(str, str)  # task_id, result
-    batch_finished = pyqtSignal()  # 批次内所有任务都完成时触发
-
-    def __init__(self, agent_manager, tool_executor, get_llm_config: Callable):
-        super().__init__()
+    def __init__(self, agent_manager, tool_executor, get_llm_config: Callable, event_bus=None):
+        # 事件总线
+        self._event_bus = event_bus or get_event_bus()
+        
+        # ========== Signal 定义（兼容 PyQt 风格 API）==========
+        self.task_started = Signal(str, str, str)  # task_id, agent_name, task_description
+        self.task_finished = Signal(str, str)  # task_id, result
+        self.batch_finished = Signal()  # 批次内所有任务都完成时触发
+        
+        # 初始化属性
         self._agent_manager = agent_manager
         self._tool_executor = tool_executor
         self._get_llm_config = get_llm_config

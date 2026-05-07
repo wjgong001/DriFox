@@ -81,6 +81,16 @@ class ChatEngine:
         # ========== 性能优化：HTTP 客户端和配置缓存 ==========
         self._compaction_http_client: Optional[OpenAI] = None  # 压缩摘要专用客户端
         self._compaction_cache_config: Optional[str] = None  # 缓存配置标识
+        
+        # 会话级权限缓存（跨 worker 持久化）
+        self._session_permission_cache: Dict[str, bool] = {}
+        
+        # 事件总线（可选，用于发布事件）
+        self._event_bus = None
+    
+    def set_event_bus(self, event_bus):
+        """设置事件总线"""
+        self._event_bus = event_bus
 
     def _make_compaction_state(
         self,
@@ -150,6 +160,11 @@ class ChatEngine:
             return "allow"
 
         try:
+            # 先检查会话级缓存（ChatEngine 级别，跨 worker 持久化）
+            if tool_name in self._session_permission_cache:
+                logger.info(f"[_check_tool_permission] 使用 ChatEngine 会话缓存: tool={tool_name}")
+                return "allow"
+            
             from app.core.agent import (
                 PermissionResolver,
             )
@@ -200,13 +215,28 @@ class ChatEngine:
     def approve_tool_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
         if self._current_worker:
             self._current_worker.approve_permission(tool_call_id, auto_allow, session_allow)
+        # 同步更新 ChatEngine 级别的会话缓存
+        if session_allow and self._current_worker:
+            tool_name = self._current_worker._permission_pending.get("tool_name", "") if self._current_worker._permission_pending else ""
+            if tool_name:
+                self._session_permission_cache[tool_name] = True
+                from loguru import logger
+                logger.info(f"[ChatEngine] 设置会话缓存: tool={tool_name}")
 
     def deny_tool_permission(self, tool_call_id: str):
         if self._current_worker:
             self._current_worker.deny_permission(tool_call_id)
 
     def clear_session_permission_cache(self, tool_name: str = None):
-        """清除会话级权限缓存"""
+        """清除会话级权限缓存（ChatEngine 和 Worker 级别）"""
+        # 清理 ChatEngine 级别的缓存
+        if tool_name:
+            if tool_name in self._session_permission_cache:
+                del self._session_permission_cache[tool_name]
+        else:
+            self._session_permission_cache = {}
+        
+        # 清理 Worker 级别的缓存
         if self._current_worker:
             if tool_name:
                 self._current_worker.set_session_permission_cache(tool_name, False)

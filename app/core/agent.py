@@ -8,12 +8,21 @@
 import fnmatch
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Callable
 
 import yaml
 from loguru import logger
 
-from app.tools import get_builtin_tools_schema
+
+def _get_builtin_tools_schema():
+    """获取内置工具 schema - 延迟导入避免顶层依赖 PyQt"""
+    try:
+        from app.tools import get_builtin_tools_schema
+        return get_builtin_tools_schema()
+    except ImportError:
+        # 在没有 PyQt 的环境中，返回空 schema
+        logger.warning("[AgentManager] 无法导入 app.tools，使用空 schema")
+        return []
 
 
 @dataclass
@@ -335,7 +344,7 @@ class AgentManager:
         if not agent:
             return []
 
-        all_tools = get_builtin_tools_schema(self)  # 传递 agent_manager 用于动态生成
+        all_tools = _get_builtin_tools_schema()  # 传递 agent_manager 用于动态生成
 
         # 【新增】子智能体禁止使用 question 工具（需要用户交互，不支持）
         if agent.is_subagent():

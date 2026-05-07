@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Chat Worker - OpenAI 对话执行器
+
+使用标准线程替代 QThread，支持前后端分离
 """
 
 import json
@@ -8,14 +10,14 @@ import re
 import time
 import httpcore
 import httpx
+import threading
 
 from loguru import logger
 from collections import deque
 from datetime import datetime
 from threading import Event
 from typing import Any, Dict, List, Callable, Optional, Tuple
-from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication
-from PyQt5.QtWidgets import QApplication
+
 from openai import (
     OpenAI, BadRequestError, RateLimitError, APIError, APIConnectionError,
 )
@@ -23,6 +25,7 @@ from openai import (
 from app.core.memory_manager import MEMORY_CATEGORIES
 from app.core.provider_profile import get_provider_profile
 from app.core.message_content import consolidate_messages, append_text_block, messages_to_api, to_api_message
+from app.core.event_bus import Signal, get_event_bus, ChatEvents
 
 
 # ========== 预编译正则表达式 ==========
@@ -128,19 +131,24 @@ def _smart_parse_arguments(raw_args: str, tool_name: str) -> Optional[Dict]:
     return None
 
 
-class OpenAIChatWorker(QThread):
-    content_received = pyqtSignal(str)
-    reasoning_content_received = pyqtSignal(str)  # DeepSeek thinking mode
-    error_occurred = pyqtSignal(str)
-    finished_with_content = pyqtSignal(str)
-    finished_with_messages = pyqtSignal(list)
-    compaction_status_changed = pyqtSignal(dict)
-    tool_call_started = pyqtSignal(str, str, dict, str)
-    tool_result_received = pyqtSignal(str, str, dict, object)
-    question_asked = pyqtSignal(str, str, list, bool)
-    permission_approval_requested = pyqtSignal(str, str, dict)
+class OpenAIChatWorker(threading.Thread):
+    """
+    OpenAI 对话执行器 - 使用标准线程替代 QThread
+    
+    信号通过 EventBus 发布，前端可订阅：
+    ```python
+    bus = get_event_bus()
+    bus.subscribe("stream:chunk", on_chunk)
+    ```
+    
+    也支持 Signal 回调：
+    ```python
+    worker.content_received.connect(handler)
+    ```
+    """
+    
     _DEFERRED_PREVIEW_TOOLS = {"question", "task", "todowrite", "todoread"}
-
+    
     def __init__(
         self,
         messages: List[Dict],
@@ -155,11 +163,41 @@ class OpenAIChatWorker(QThread):
         permission_check_callback=None,
         compaction_prompt: str = "",
         compaction_config: Dict = None,
+        event_bus=None,
     ):
-        super().__init__()
+        super().__init__(daemon=True)
+        
+        # 事件总线
+        self._event_bus = event_bus or get_event_bus()
+        
+        # ========== Signal 定义（兼容 PyQt 风格 API）==========
+        self.content_received = Signal(str)
+        self.reasoning_content_received = Signal(str)  # DeepSeek thinking mode
+        self.error_occurred = Signal(str)
+        self.finished_with_content = Signal(str)
+        self.finished_with_messages = Signal(list)
+        self.compaction_status_changed = Signal(dict)
+        self.tool_call_started = Signal(str, str, dict, str)
+        self.tool_result_received = Signal(str, str, dict, object)
+        self.question_asked = Signal(str, str, list, bool)
+        self.permission_approval_requested = Signal(str, str, dict)
+        
+        # 初始化属性
         self.messages = messages
         self.session_messages = consolidate_messages(session_messages or [])
         self.llm_config = llm_config
+        self.tools = tools or []
+        self.stream = stream
+        self.tool_executor = tool_executor
+        self.tool_start_callback = tool_start_callback
+        self.get_stage_prompt = get_stage_prompt
+        self.stage_changed_callback = stage_changed_callback
+        self.permission_check_callback = permission_check_callback
+        self.compaction_prompt = compaction_prompt
+        self.compaction_config = compaction_config or {}
+        
+        # 初始化工作线程属性
+        self.full_response = ""
         self.tools = tools or []
         self.stream = stream
         self.tool_executor = tool_executor

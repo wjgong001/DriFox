@@ -2,11 +2,13 @@
 """
 ChatBackend - 统一后端接口
 后端自己创建和管理所有组件，前端只负责 UI 调用
+
+支持前后端分离，可接入任何形式的前端（桌面/Web/移动端）
 """
 
+import threading
 from typing import Dict, List, Any, Optional, Callable
 
-from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool
 from loguru import logger
 
 from app.core.agent import AgentManager
@@ -14,46 +16,45 @@ from app.core.chat_engine import ChatEngine
 from app.core.chat_session import SessionManager, ChatSession
 from app.core.memory_manager import MemoryManagerCore
 from app.core.tool_executor import ToolExecutor
+from app.core.event_bus import (
+    Signal,
+    ChatEvents,
+    get_event_bus,
+    EventBus,
+)
+from app.core.workers import WorkerPool
 
 
-class ChatBackend(QObject):
+class ChatBackend:
     """
     聊天后端 - 自己创建所有核心组件，暴露统一接口给前端
     
     职责：
     1. 创建并管理 ChatEngine, SessionManager, ToolExecutor 等
     2. 暴露统一的 API 给前端（UI 层）
-    3. 发出状态变化信号供前端订阅
+    3. 通过 EventBus/Signal 发出状态变化信号供前端订阅
+    
+    前端可以通过以下方式订阅事件：
+    ```python
+    # 方式1: 使用 EventBus
+    from app.core import get_event_bus
+    bus = get_event_bus()
+    bus.subscribe("stream:chunk", on_chunk)
+    
+    # 方式2: 使用 Signal
+    backend.stream_chunk.connect(on_chunk)
+    ```
     """
     
-    # ========== 信号定义 ==========
-    # 会话相关
-    session_created = pyqtSignal(str)  # session_id
-    session_changed = pyqtSignal(str)  # session_id
-    session_deleted = pyqtSignal(int)  # index
-    
-    # 消息相关
-    message_received = pyqtSignal(dict)  # 新消息
-    stream_started = pyqtSignal()
-    stream_chunk = pyqtSignal(str)  # 流式内容片段
-    stream_finished = pyqtSignal(dict)  # 完成时的消息
-    reasoning_content = pyqtSignal(str)  # DeepSeek thinking mode
-    
-    # 工具相关
-    tool_call_started = pyqtSignal(str, str, dict)  # tool_call_id, tool_name, arguments
-    tool_result_received = pyqtSignal(str, str, dict, bool)  # tool_call_id, name, result, success
-    
-    # 权限相关
-    permission_requested = pyqtSignal(str, str, dict)  # tool_call_id, tool_name, arguments
-    
-    # 错误
-    error_occurred = pyqtSignal(str)
-    
-    # 上下文
-    context_updated = pyqtSignal(int, int)  # token_count, limit
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, event_bus: Optional[EventBus] = None):
+        """
+        初始化后端
+        
+        Args:
+            event_bus: 事件总线实例（可选，默认使用全局实例）
+        """
+        # 事件总线
+        self._event_bus = event_bus or get_event_bus()
         
         # 核心组件（后端自己创建）
         self._session_manager: Optional[SessionManager] = None
@@ -67,10 +68,94 @@ class ChatBackend(QObject):
         self._get_model_config: Optional[Callable] = None
         
         # 线程池
-        self._thread_pool = QThreadPool()
+        self._thread_pool = WorkerPool(max_workers=4)
         
         # 状态
         self._initialized = False
+        
+        # ========== Signal 定义（兼容 PyQt 风格的 API）==========
+        # 会话相关
+        self.session_created = Signal(str)  # session_id
+        self.session_changed = Signal(str)  # session_id
+        self.session_deleted = Signal(int)  # index
+        
+        # 消息相关
+        self.message_received = Signal(dict)  # 新消息
+        self.stream_started = Signal()  # 流式开始
+        self.stream_chunk = Signal(str)  # 流式内容片段
+        self.stream_finished = Signal(dict)  # 完成时的消息
+        self.reasoning_content = Signal(str)  # DeepSeek thinking mode
+        
+        # 工具相关
+        self.tool_call_started = Signal(str, str, dict)  # tool_call_id, tool_name, arguments
+        self.tool_result_received = Signal(str, str, dict, bool)  # tool_call_id, name, result, success
+        
+        # 权限相关
+        self.permission_requested = Signal(str, str, dict)  # tool_call_id, tool_name, arguments
+        
+        # 错误
+        self.error_occurred = Signal(str)
+        
+        # 上下文
+        self.context_updated = Signal(int, int)  # token_count, limit
+        
+        # 注册 Signal 到 EventBus（双向同步）
+        self._register_signals_to_event_bus()
+        
+        logger.debug("[ChatBackend] 实例创建完成")
+    
+    def _register_signals_to_event_bus(self):
+        """将 Signal 连接到 EventBus"""
+        # 会话信号 -> EventBus
+        self.session_created.connect(
+            lambda sid: self._event_bus.emit(ChatEvents.SESSION_CREATED, sid)
+        )
+        self.session_changed.connect(
+            lambda sid: self._event_bus.emit(ChatEvents.SESSION_CHANGED, sid)
+        )
+        self.session_deleted.connect(
+            lambda idx: self._event_bus.emit(ChatEvents.SESSION_DELETED, idx)
+        )
+        
+        # 消息信号 -> EventBus
+        self.message_received.connect(
+            lambda msg: self._event_bus.emit(ChatEvents.MESSAGE_RECEIVED, msg)
+        )
+        self.stream_started.connect(
+            lambda: self._event_bus.emit(ChatEvents.STREAM_STARTED)
+        )
+        self.stream_chunk.connect(
+            lambda chunk: self._event_bus.emit(ChatEvents.STREAM_CHUNK, chunk)
+        )
+        self.stream_finished.connect(
+            lambda msg: self._event_bus.emit(ChatEvents.STREAM_FINISHED, msg)
+        )
+        self.reasoning_content.connect(
+            lambda content: self._event_bus.emit(ChatEvents.REASONING_CONTENT, content)
+        )
+        
+        # 工具信号 -> EventBus
+        self.tool_call_started.connect(
+            lambda tid, name, args: self._event_bus.emit(ChatEvents.TOOL_CALL_STARTED, tid, name, args)
+        )
+        self.tool_result_received.connect(
+            lambda tid, name, result, success: self._event_bus.emit(ChatEvents.TOOL_RESULT_RECEIVED, tid, name, result, success)
+        )
+        
+        # 权限信号 -> EventBus
+        self.permission_requested.connect(
+            lambda tid, name, args: self._event_bus.emit(ChatEvents.PERMISSION_REQUESTED, tid, name, args)
+        )
+        
+        # 错误信号 -> EventBus
+        self.error_occurred.connect(
+            lambda err: self._event_bus.emit(ChatEvents.ERROR_OCCURRED, err)
+        )
+        
+        # 上下文信号 -> EventBus
+        self.context_updated.connect(
+            lambda count, limit: self._event_bus.emit(ChatEvents.CONTEXT_UPDATED, count, limit)
+        )
     
     # ========== 属性访问 ==========
     
@@ -98,9 +183,42 @@ class ChatBackend(QObject):
     def sub_agent_manager(self):
         return self._sub_agent_manager
     
+    def set_sub_agent_manager(self, manager):
+        """设置子智能体管理器"""
+        self._sub_agent_manager = manager
+    
+    def set_session_context(self, session_id: str, call_id: str = None):
+        """设置会话上下文（代理到 ToolExecutor）"""
+        if self._tool_executor:
+            self._tool_executor.set_session_context(session_id, call_id)
+    
+    def get_context_usage_snapshot(self, session, llm_config) -> Dict:
+        """获取上下文使用快照（代理到 ChatEngine）"""
+        if self._chat_engine:
+            return self._chat_engine.get_context_usage_snapshot(session, llm_config)
+        return {}
+    
+    def send_message_to_engine(self, text: str, context_params: Dict = None) -> bool:
+        """发送消息到引擎（代理到 ChatEngine）"""
+        if self._chat_engine:
+            return self._chat_engine.send_message(text, context_params)
+        return False
+    
+    @property
+    def file_recorder(self):
+        """获取文件操作记录器（代理到 ToolExecutor）"""
+        if self._tool_executor:
+            return self._tool_executor.file_recorder
+        return None
+    
     @property
     def is_initialized(self) -> bool:
         return self._initialized
+    
+    @property
+    def event_bus(self) -> EventBus:
+        """获取事件总线"""
+        return self._event_bus
     
     # ========== 初始化 ==========
     
@@ -124,7 +242,7 @@ class ChatBackend(QObject):
         
         self._get_model_config = get_model_config
         
-        # 1. 创建 SessionManager
+        # 1. 创建 SessionManager（已移除 QObject 依赖）
         self._session_manager = SessionManager()
         self._session_manager.create_new_session()
         logger.info("[ChatBackend] SessionManager 创建完成")
@@ -140,11 +258,13 @@ class ChatBackend(QObject):
             self._agent_manager = AgentManager()
         logger.info(f"[ChatBackend] AgentManager 就绪，{len(self._agent_manager.list_agents())} 个 Agent")
         
-        # 4. 创建 ToolExecutor（不传递 homepage，解耦 Qt）
+        # 4. 创建 ToolExecutor
         self._tool_executor = ToolExecutor(workdir=workdir)
         self._tool_executor.set_memory_manager(self._memory_manager)
         self._tool_executor.set_llm_config_getter(get_model_config)
         self._tool_executor.set_agent_manager(self._agent_manager)
+        # 传递事件总线给 ToolExecutor
+        self._tool_executor.set_event_bus(self._event_bus)
         logger.info("[ChatBackend] ToolExecutor 创建完成")
         
         # 5. 创建 ChatEngine
@@ -154,10 +274,50 @@ class ChatBackend(QObject):
             tool_executor=self._tool_executor,
             agent_manager=self._agent_manager,
         )
+        # 设置事件总线
+        self._chat_engine.set_event_bus(self._event_bus)
+        # 连接信号
+        self._connect_chat_engine_signals()
         logger.info("[ChatBackend] ChatEngine 创建完成")
+        
+        # 6. 设置主线程 ID（用于跨线程通信）
+        self._event_bus.set_main_thread()
         
         self._initialized = True
         logger.info("[ChatBackend] 初始化完成")
+    
+    def _connect_chat_engine_signals(self):
+        """连接 ChatEngine 的信号"""
+        if self._chat_engine is None:
+            return
+        
+        # 连接 ChatEngine 的回调到后端信号
+        if hasattr(self._chat_engine, 'on_stream_chunk'):
+            # ChatEngine 使用回调模式，这里不需要额外连接
+            pass
+        
+        # 监听 EventBus 中的事件并转发到 Signal
+        def on_stream_chunk(chunk: str):
+            self.stream_chunk.emit(chunk)
+        
+        def on_stream_finished(msg: dict):
+            self.stream_finished.emit(msg)
+        
+        def on_tool_call(tid: str, name: str, args: dict):
+            self.tool_call_started.emit(tid, name, args)
+        
+        def on_tool_result(tid: str, name: str, result: dict, success: bool):
+            self.tool_result_received.emit(tid, name, result, success)
+        
+        def on_error(err: str):
+            self.error_occurred.emit(err)
+        
+        # 订阅 ChatEngine 发布的事件
+        self._event_bus.subscribe(ChatEvents.STREAM_CHUNK, on_stream_chunk)
+        self._event_bus.subscribe(ChatEvents.STREAM_FINISHED, on_stream_finished)
+        self._event_bus.subscribe(ChatEvents.TOOL_CALL_STARTED, on_tool_call)
+        self._event_bus.subscribe(ChatEvents.TOOL_RESULT_RECEIVED, on_tool_result)
+        self._event_bus.subscribe(ChatEvents.ERROR_OCCURRED, on_error)
     
     def set_callback(self, name: str, callback: Callable):
         """设置回调（代理到 ChatEngine）"""
@@ -170,95 +330,6 @@ class ChatBackend(QObject):
             for name, callback in callbacks.items():
                 self._chat_engine.set_callback(name, callback)
     
-    # ========== ChatEngine 代理方法 ==========
-    
-    def stop_streaming(self):
-        """停止流式输出"""
-        if self._chat_engine:
-            return self._chat_engine.stop()
-    
-    def cleanup_worker(self):
-        """清理 worker"""
-        if self._chat_engine:
-            self._chat_engine.cleanup_worker()
-    
-    def get_context_usage_snapshot(self, session, llm_config) -> Dict:
-        """获取上下文使用快照"""
-        if self._chat_engine:
-            return self._chat_engine.get_context_usage_snapshot(session, llm_config)
-        return {}
-    
-    def switch_agent(self, agent_name: str):
-        """切换 Agent"""
-        if self._chat_engine:
-            self._chat_engine.switch_agent(agent_name)
-    
-    def approve_tool_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
-        """批准工具调用权限"""
-        if self._chat_engine:
-            self._chat_engine.approve_tool_permission(tool_call_id, auto_allow, session_allow)
-    
-    def deny_tool_permission(self, tool_call_id: str):
-        """拒绝工具调用权限"""
-        if self._chat_engine:
-            self._chat_engine.deny_tool_permission(tool_call_id)
-    
-    def provide_question_answer(self, answer: str):
-        """提供问题答案"""
-        if self._chat_engine:
-            self._chat_engine.provide_question_answer(answer)
-    
-    def send_message_to_engine(self, text: str, context_params: Dict = None) -> bool:
-        """发送消息到引擎"""
-        if self._chat_engine:
-            return self._chat_engine.send_message(text, context_params or {})
-        return False
-    
-    # ========== ToolExecutor 代理方法 ==========
-    
-    def set_session_context(self, session_id: str):
-        """设置会话上下文"""
-        if self._tool_executor:
-            self._tool_executor.set_session_context(session_id)
-    
-    def set_sub_agent_manager(self, manager):
-        """设置子智能体管理器"""
-        self._sub_agent_manager = manager
-        if self._tool_executor:
-            self._tool_executor.set_sub_agent_manager(manager)
-    
-    def reset_session_state(self):
-        """重置会话状态"""
-        if self._tool_executor:
-            self._tool_executor.reset_session_state()
-    
-    def clear_todo_list(self):
-        """清空待办列表"""
-        if self._tool_executor:
-            self._tool_executor.clear_todo_list()
-    
-    @property
-    def todo_list(self):
-        """获取待办列表"""
-        if self._tool_executor:
-            return self._tool_executor.todo_list
-        return []
-    
-    @property
-    def file_recorder(self):
-        """获取文件操作记录器"""
-        if self._tool_executor:
-            return getattr(self._tool_executor, 'file_recorder', None)
-        return None
-    
-    def execute_skill(self, method: str, params: Dict):
-        """执行技能"""
-        if self._tool_executor:
-            return self._tool_executor.execute_skill(method, params)
-        return None
-    
-    # ========== AgentManager 代理方法 ==========
-    
     def get_primary_agents(self) -> List:
         """获取主 Agent 列表"""
         if self._agent_manager:
@@ -270,6 +341,12 @@ class ChatBackend(QObject):
         if self._agent_manager:
             return self._agent_manager.get_agent(name)
         return None
+    
+    def switch_agent(self, agent_name: str):
+        """切换 Agent"""
+        if self._chat_engine:
+            self._chat_engine._current_agent = agent_name
+            logger.info(f"[ChatBackend] 切换 Agent: {agent_name}")
     
     # ========== 会话管理 ==========
     
@@ -325,8 +402,10 @@ class ChatBackend(QObject):
     
     def stop_streaming(self):
         """停止流式输出"""
-        if self._chat_engine and self._chat_engine._current_worker:
-            self._chat_engine._current_worker.stop()
+        if self._chat_engine and hasattr(self._chat_engine, '_current_worker'):
+            worker = self._chat_engine._current_worker
+            if worker:
+                worker.stop()
     
     def approve_permission(self, tool_call_id: str, auto_allow: bool = False, session_allow: bool = False):
         """批准权限"""
@@ -354,3 +433,29 @@ class ChatBackend(QObject):
         if self._chat_engine:
             return self._chat_engine._get_context_usage()
         return (0, 0)
+    
+    # ========== 生命周期管理 ==========
+    
+    def shutdown(self):
+        """关闭后端，清理资源"""
+        logger.info("[ChatBackend] 关闭中...")
+        
+        # 停止所有 Worker
+        self._thread_pool.stop_all()
+        
+        # 清理 ChatEngine
+        if self._chat_engine:
+            self._chat_engine.cleanup_worker()
+        
+        # 清空事件监听
+        self._event_bus.clear()
+        
+        self._initialized = False
+        logger.info("[ChatBackend] 关闭完成")
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.shutdown()
+        return False

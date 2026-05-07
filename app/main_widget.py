@@ -744,6 +744,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.backend.tool_executor:
             self._tool_executor.reset_session_state()
         
+        # 清理会话级权限缓存
+        if self._chat_engine:
+            self._chat_engine.clear_session_permission_cache()
+        
         session = self.session_manager.create_new_session()
         self._current_session_id = session.session_id
         self._history_preview_messages = None
