@@ -19,3 +19,4 @@ pyinstaller~=6.16.0
 markdown
 pygments
 requests
+aiohttp>=3.9.0
