@@ -20,6 +20,7 @@ LLM Chatter HTTP API 服务
 
 对话接口：
 - POST /sessions/{id}/chat/stream    - 在指定会话中对话（流式 SSE）
+- POST /chat/stream                 - 独立聊天流式端点（自动会话管理）
 - POST /chat/stop                   - 停止当前流式请求
 """
 
