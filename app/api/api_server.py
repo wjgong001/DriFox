@@ -42,6 +42,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
+# 导入路由模块
+from app.adapters.fastapi.routes import (
+    create_health_router,
+    create_session_router,
+    create_chat_router,
+)
+
 # 全局服务实例
 _llm_api_service: Optional["LLMAPIService"] = None
 _api_starting = False
@@ -107,84 +114,69 @@ class LLMAPIService:
         self._setup_routes()
 
     def _setup_routes(self):
-        """设置所有路由"""
+        """设置所有模块化路由"""
         
-        # ==================== 健康检查 ====================
-        @self.app.get("/health")
-        async def health_check():
-            """健康检查"""
+        # 获取会话处理器的回调
+        def get_running():
+            return self._running
+        
+        def get_service_info():
             handler = self.get_session_handler()
             return {
-                "status": "ok" if self._running else "stopped",
-                "service": "llm_chatter_api",
+                "name": "llm_chatter_api",
                 "version": "2.0.0",
-                "running": self._running,
                 "address": f"http://{self.host}:{self.port}" if self._running else None,
                 "ui_linked": handler is not None,
             }
-
-        # ==================== 会话管理 ====================
-        @self.app.get("/sessions", response_model=Dict[str, Any])
-        async def list_sessions():
-            """获取所有会话列表"""
+        
+        def list_sessions_handler():
             handler = self.get_session_handler()
             if not handler:
                 raise HTTPException(
                     status_code=503,
                     detail="会话处理器未初始化，请确保 LLMChatter 窗口已打开"
                 )
-            
-            sessions = handler.list_sessions()
-            return {"success": True, "sessions": sessions}
-
-        @self.app.post("/sessions", response_model=Dict[str, Any])
-        async def create_session(request: Optional[Dict[str, Any]] = None):
-            """创建新会话
-            
-            Request Body (可选):
-                {"title": "会话标题"}
-            """
-            handler = self.get_session_handler()
-            if not handler:
-                raise HTTPException(
-                    status_code=503,
-                    detail="会话处理器未初始化"
-                )
-            
-            title = ""
-            if request:
-                title = request.get("title", "")
-            
-            session = handler.create_session(title=title)
-            if not session:
-                raise HTTPException(status_code=500, detail="创建会话失败")
-            
-            return {"success": True, "session": session}
-
-        @self.app.get("/sessions/{session_id}", response_model=Dict[str, Any])
-        async def get_session(session_id: str):
-            """获取指定会话详情"""
+            return handler.list_sessions()
+        
+        def get_session_handler(session_id: str):
             handler = self.get_session_handler()
             if not handler:
                 raise HTTPException(status_code=503, detail="会话处理器未初始化")
-            
             session = handler.get_session(session_id)
             if not session:
                 raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
-            
-            return {"success": True, "session": session}
-
-        @self.app.delete("/sessions/{session_id}", response_model=Dict[str, Any])
-        async def delete_session(session_id: str):
-            """删除会话"""
+            return session
+        
+        def create_session_handler(title: str = ""):
             handler = self.get_session_handler()
             if not handler:
                 raise HTTPException(status_code=503, detail="会话处理器未初始化")
-            
-            if handler.delete_session(session_id):
-                return {"success": True, "message": f"会话 {session_id} 已删除"}
-            else:
-                raise HTTPException(status_code=500, detail="删除会话失败")
+            session = handler.create_session(title=title)
+            if not session:
+                raise HTTPException(status_code=500, detail="创建会话失败")
+            return session
+        
+        def delete_session_handler(session_id: str):
+            handler = self.get_session_handler()
+            if not handler:
+                raise HTTPException(status_code=503, detail="会话处理器未初始化")
+            return handler.delete_session(session_id)
+        
+        # 注册健康检查路由
+        health_router = create_health_router(get_running, get_service_info)
+        self.app.include_router(health_router)
+        
+        # 注册会话管理路由
+        session_router = create_session_router(
+            list_sessions=list_sessions_handler,
+            get_session=get_session_handler,
+            create_session=create_session_handler,
+            delete_session=delete_session_handler,
+        )
+        self.app.include_router(session_router)
+        
+        # 注册聊天流式路由
+        self.app.include_router(create_chat_router("/chat"))
 
         # ==================== 对话接口（核心，支持并发） ====================
         @self.app.post("/sessions/{session_id}/chat/stream")
