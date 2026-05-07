@@ -90,14 +90,12 @@ def _register_routes(app: FastAPI) -> None:
     - /agents/* - Agent 管理
     - /tools/* - 工具管理
     """
-    # 延迟导入避免循环依赖
-    try:
-        from app.api.api_session_handler import get_session_handler
-        _register_session_routes(app, get_session_handler)
-        _register_chat_routes(app, get_session_handler)
-        logger.info("[FastAPI] 路由注册完成")
-    except ImportError as e:
-        logger.warning(f"[FastAPI] 路由注册失败: {e}")
+    # 导入独立的会话管理器
+    from app.adapters.fastapi.api_session_manager import get_standalone_api_manager
+    
+    _register_session_routes(app, lambda: get_standalone_api_manager())
+    _register_chat_routes(app, lambda: get_standalone_api_manager())
+    logger.info("[FastAPI] 路由注册完成")
 
 
 def _register_session_routes(app: FastAPI, get_handler_func) -> None:

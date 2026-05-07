@@ -518,7 +518,7 @@ class APISessionHandler:
             logger.error(f"[APISession] delete_session 失败: {e}")
             return False
 
-    def switch_session(self, session_id: str) -> Optional[ChatSession]:
+    def switch_session(self, session_id: str) -> Optional["ChatSession"]:
         """切换到指定会话，返回会话对象（不修改共享状态）
         
         Returns:
@@ -531,9 +531,7 @@ class APISessionHandler:
                 
                 if session_data:
                     # 从 SQLite 数据恢复会话
-                    from app.llm_chatter.utils.chat_session import (
-                        ChatSession,
-                    )
+                    from app.core.chat_session import ChatSession
                     session = ChatSession.from_dict({
                         "session_id": session_data.get("session_id", session_id),
                         "name": session_data.get("title", "未命名"),
@@ -553,15 +551,13 @@ class APISessionHandler:
             logger.error(f"[APISession] switch_session 失败: {e}")
             return None
 
-    def _set_engine_session(self, engine, session: ChatSession) -> None:
+    def _set_engine_session(self, engine, session: "ChatSession") -> None:
         """为 ChatEngine 设置会话（API 专用，不影响共享状态）
         
         API 模式下直接替换引擎内部的 session_manager 的当前会话，
         不经过共享的 session_manager，避免影响 UI。
         """
-        from app.llm_chatter.utils.chat_session import (
-            ChatSession,
-        )
+        from app.core.chat_session import ChatSession
         # 创建一个深拷贝，避免修改原对象
         session_copy = ChatSession.from_dict({
             "session_id": session.session_id,
@@ -784,3 +780,35 @@ class APISessionHandler:
     def get_active_streams(self) -> List[str]:
         """获取活跃的流 ID 列表"""
         return [sid for sid, ctx in self._active_streams.items() if ctx.is_active]
+
+
+# ==================== 全局单例 ====================
+
+_handler_instance: Optional[APISessionHandler] = None
+
+def get_session_handler(main_widget=None) -> Optional[APISessionHandler]:
+    """获取 APISessionHandler 单例
+    
+    用于 FastAPI 路由访问会话处理器。
+    如果 main_widget 提供，则初始化或返回现有实例。
+    如果 main_widget 为 None，则返回现有实例（可能为 None）。
+    
+    Args:
+        main_widget: 可选，UI 主窗口实例
+        
+    Returns:
+        APISessionHandler 实例，或 None（如果未初始化且无 main_widget）
+    """
+    global _handler_instance
+    
+    if _handler_instance is None and main_widget is not None:
+        _handler_instance = APISessionHandler(main_widget)
+    
+    return _handler_instance
+
+
+def initialize_handler(main_widget):
+    """初始化会话处理器（由 UI 调用）"""
+    global _handler_instance
+    _handler_instance = APISessionHandler(main_widget)
+    return _handler_instance
