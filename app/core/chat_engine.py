@@ -29,7 +29,7 @@ from app.core.token_estimator import (
     estimate_tokens,
     count_messages_tokens,
 )
-from app.core.workers import OpenAIChatWorker
+from app.core.workers import OpenAIChatWorker, AsyncOpenAIChatWorker
 
 MAX_HISTORY_SNIPPET_CHARS = 1200
 RECENT_HISTORY_MIN_MESSAGES = 6
@@ -61,6 +61,7 @@ class ChatEngine:
         get_memory_context: Optional[Callable[[], str]] = None,
         worker_callbacks: Optional[Dict[str, Callable]] = None,
         api_mode: bool = False,
+        use_async_worker: bool = False,
     ):
         self._session_manager = session_manager
         self._get_model_config = get_model_config
@@ -69,7 +70,7 @@ class ChatEngine:
         self._get_chat_cards = get_chat_cards
         self._get_memory_context = get_memory_context
 
-        self._current_worker: Optional[OpenAIChatWorker] = None
+        self._current_worker: Optional[Any] = None
         self._is_streaming = False
         self._callbacks: Dict[str, Callable] = {}
         self._current_agent: Optional[str] = "plan"
@@ -77,6 +78,9 @@ class ChatEngine:
         # API 模式专用：直接回调（绕过 Qt 信号-槽，避免跨线程事件循环问题）
         self._worker_callbacks = worker_callbacks or {}
         self._api_mode = api_mode
+        
+        # 是否使用无 PyQt 依赖的异步 worker
+        self._use_async_worker = use_async_worker
         
         # ========== 性能优化：HTTP 客户端和配置缓存 ==========
         self._compaction_http_client: Optional[OpenAI] = None  # 压缩摘要专用客户端
@@ -1042,37 +1046,64 @@ class ChatEngine:
             compaction_config = self._agent_manager.get_agent_config("compaction")
         session = self._session_manager.get_current_session()
 
-        self._current_worker = OpenAIChatWorker(
-            messages=messages,
-            session_messages=session.get_context_messages() if session else [],
-            llm_config=llm_config,
-            tools=tools,
-            tool_executor=self._tool_executor,
-            tool_start_callback=self._callbacks.get("tool_call_sync_requested"),
-            permission_check_callback=self._check_tool_permission,
-            compaction_prompt=compaction_prompt,
-            compaction_config=compaction_config,
-        )
-
-        # API 模式：直接调用回调（不使用 Qt 信号-槽，避免跨线程事件循环问题）
-        # API 模式下 worker 运行在没有 Qt 事件循环的线程中，Qt 信号无法传递
-        if self._api_mode and self._worker_callbacks:
-            self._current_worker.set_direct_callbacks(self._worker_callbacks)
+        # 根据配置选择使用哪种 worker
+        if self._use_async_worker:
+            # 使用无 PyQt 依赖的异步 worker
+            self._current_worker = AsyncOpenAIChatWorker(
+                messages=messages,
+                session_messages=session.get_context_messages() if session else [],
+                llm_config=llm_config,
+                tools=tools,
+                tool_executor=self._tool_executor,
+                tool_start_callback=self._callbacks.get("tool_call_sync_requested"),
+                permission_check_callback=self._check_tool_permission,
+                compaction_prompt=compaction_prompt,
+                compaction_config=compaction_config,
+            )
+            # 设置直接回调（无 PyQt worker 不使用信号）
+            self._current_worker.set_direct_callbacks({
+                "content_received": self._on_content_received,
+                "reasoning_content_received": self._on_reasoning_content_received,
+                "tool_call_started": self._on_tool_call_started,
+                "tool_result_received": self._on_tool_result_received,
+                "error_occurred": self._on_error,
+                "finished_with_content": self._on_worker_finished,
+                "finished_with_messages": self._on_worker_messages_updated,
+                "question_asked": self._on_question_asked,
+                "permission_approval_requested": self._on_permission_approval_requested,
+            })
         else:
-            # UI 模式：使用 Qt 信号-槽机制
-            self._current_worker.content_received.connect(self._on_content_received)
-            self._current_worker.reasoning_content_received.connect(self._on_reasoning_content_received)
-            self._current_worker.tool_call_started.connect(self._on_tool_call_started)
-            self._current_worker.tool_result_received.connect(self._on_tool_result_received)
-            self._current_worker.error_occurred.connect(self._on_error)
-            self._current_worker.finished_with_content.connect(self._on_worker_finished)
-            self._current_worker.finished_with_messages.connect(
-                self._on_worker_messages_updated
+            # 使用原始的 PyQt worker（向后兼容）
+            self._current_worker = OpenAIChatWorker(
+                messages=messages,
+                session_messages=session.get_context_messages() if session else [],
+                llm_config=llm_config,
+                tools=tools,
+                tool_executor=self._tool_executor,
+                tool_start_callback=self._callbacks.get("tool_call_sync_requested"),
+                permission_check_callback=self._check_tool_permission,
+                compaction_prompt=compaction_prompt,
+                compaction_config=compaction_config,
             )
-            self._current_worker.question_asked.connect(self._on_question_asked)
-            self._current_worker.permission_approval_requested.connect(
-                self._on_permission_approval_requested
-            )
+            # API 模式：直接调用回调（不使用 Qt 信号-槽，避免跨线程事件循环问题）
+            # API 模式下 worker 运行在没有 Qt 事件循环的线程中，Qt 信号无法传递
+            if self._api_mode and self._worker_callbacks:
+                self._current_worker.set_direct_callbacks(self._worker_callbacks)
+            else:
+                # UI 模式：使用 Qt 信号-槽机制
+                self._current_worker.content_received.connect(self._on_content_received)
+                self._current_worker.reasoning_content_received.connect(self._on_reasoning_content_received)
+                self._current_worker.tool_call_started.connect(self._on_tool_call_started)
+                self._current_worker.tool_result_received.connect(self._on_tool_result_received)
+                self._current_worker.error_occurred.connect(self._on_error)
+                self._current_worker.finished_with_content.connect(self._on_worker_finished)
+                self._current_worker.finished_with_messages.connect(
+                    self._on_worker_messages_updated
+                )
+                self._current_worker.question_asked.connect(self._on_question_asked)
+                self._current_worker.permission_approval_requested.connect(
+                    self._on_permission_approval_requested
+                )
 
         self._current_worker.start()
         self._emit("stream_started")
@@ -1127,8 +1158,10 @@ class ChatEngine:
                     f"[ChatEngine] Failed to snapshot interrupted messages: {exc}"
                 )
             worker.cancel()
-            if worker.isRunning():
+            # 兼容 QThread 和 threading.Thread
+            if hasattr(worker, 'isRunning') and worker.isRunning():
                 worker.quit()
+            # AsyncOpenAIChatWorker 使用 daemon thread，无需显式停止
             # 彻底清理 worker 的所有缓存数据
             try:
                 worker.cleanup()
@@ -1149,7 +1182,8 @@ class ChatEngine:
         if worker:
             try:
                 worker.cancel()
-                if worker.isRunning():
+                # 兼容 QThread 和 threading.Thread
+                if hasattr(worker, 'isRunning') and worker.isRunning():
                     worker.quit()
                 worker.cleanup()
             except Exception as exc:

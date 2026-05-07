@@ -11,6 +11,7 @@ from app.core.memory_manager import MemoryManagerCore
 from app.core.agent import Agent, AgentManager, create_agent_manager
 from app.core.workers import (
     OpenAIChatWorker,
+    AsyncOpenAIChatWorker,
     SubAgentExecutor,
     SubAgentManager,
     TopicSummaryTask,
@@ -75,6 +76,7 @@ __all__ = [
     "create_agent_manager",
     # Worker
     "OpenAIChatWorker",
+    "AsyncOpenAIChatWorker",
     "SubAgentExecutor",
     "SubAgentManager",
     "TopicSummaryTask",
