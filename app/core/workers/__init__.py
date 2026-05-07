@@ -14,9 +14,7 @@ from app.core.workers.shell_task import ShellExecutionTask
 from app.core.workers.async_chat_worker import AsyncOpenAIChatWorker
 from app.core.workers.async_topic_summary import TopicSummaryTask
 from app.core.workers.async_shell_task import execute_shell
-
-# 注意: SubAgentExecutor 尚未提供异步版本，仍需使用同步版本
-# 如需异步执行子智能体，请使用 task_batch 工具
+from app.core.workers.async_subagent_worker import AsyncSubAgentExecutor
 
 __all__ = [
     # DEPRECATED - 同步版本（将在未来移除）
@@ -27,6 +25,7 @@ __all__ = [
     "ShellExecutionTask",
     # 异步版本（推荐使用）
     "AsyncOpenAIChatWorker",
+    "AsyncSubAgentExecutor",
     "TopicSummaryTask",
     "execute_shell",
 ]
