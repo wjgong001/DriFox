@@ -11,6 +11,9 @@ beautifulsoup4>=4.12.0
 PyYAML>=6.0
 fastapi>=0.100.0
 uvicorn>=0.23.0
+sse-starlette>=1.6.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
 psutil
 pyinstaller~=6.16.0
 markdown
