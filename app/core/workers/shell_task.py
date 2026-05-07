@@ -10,6 +10,7 @@ class ShellExecutionTask(QRunnable):
     """异步执行Shell命令任务"""
 
     def __init__(self, command: str, callback):
+        # DEPRECATED: QRunnable 只用于 PyQt5 环境
         super().__init__()
         self.command = command
         self.callback = callback
@@ -17,6 +18,7 @@ class ShellExecutionTask(QRunnable):
 
     @pyqtSlot()
     def run(self):
+        # DEPRECATED: 迁移到 async_shell_task.py 的 execute_shell 函数
         import subprocess
         import platform
 

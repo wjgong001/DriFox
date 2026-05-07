@@ -1,19 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 Chat Worker - OpenAI 对话执行器
+
+DEPRECATED: 此文件使用 PyQt5.QtCore.QThread，已被 async_chat_worker.py 替代
+请使用 AsyncOpenAIChatWorker
 """
 
-import json
-import re
-import time
-import httpcore
-import httpx
-
-from loguru import logger
-from collections import deque
-from datetime import datetime
-from threading import Event
-from typing import Any, Dict, List, Callable, Optional, Tuple
+# DEPRECATED: PyQt5 依赖 - 迁移到 async_chat_worker.py
 from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication
 from PyQt5.QtWidgets import QApplication
 from openai import (

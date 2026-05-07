@@ -1,39 +1,51 @@
 # -*- coding: utf-8 -*-
 """
 话题摘要任务 - 异步生成话题摘要和长期记忆判断
-
-DEPRECATED: 使用 PyQt5.QtCore.QRunnable，已被 async_topic_summary.py 替代
-请使用 TopicSummaryTask (从 async_topic_summary 导出)
+使用 threading 替代 QRunnable
 """
 
-# DEPRECATED: PyQt5 依赖 - 迁移到 async_topic_summary.py
-from PyQt5.QtCore import QRunnable, pyqtSlot
+import json
+import re
+import threading
+from typing import Callable, Optional, List, Dict, Any
+
+from loguru import logger
 from openai import OpenAI
 
 from app.core.memory_manager import MEMORY_CATEGORIES
 from app.core.retry_helper import create_api_call_with_retry
 
 
-class TopicSummaryTask(QRunnable):
-    """异步生成话题摘要任务 - 支持增量摘要和长期记忆判断"""
+class TopicSummaryTask:
+    """异步生成话题摘要任务 - 支持增量摘要和长期记忆判断
+    
+    使用 threading 替代 QRunnable，保持相同的 API 接口
+    """
 
     def __init__(
         self,
         messages: list,
         llm_config: dict,
-        callback,
+        callback: Callable[[Dict[str, Any]], None],
         previous_summary: str = None,
         long_term_memory: str = "",
         existing_memories: list = None,
     ):
-        super().__init__()
         self.messages = messages
         self.llm_config = llm_config
         self.callback = callback
         self.previous_summary = previous_summary
         self.long_term_memory = long_term_memory
         self.existing_memories = existing_memories or []
-        self.setAutoDelete(True)
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        """启动后台执行"""
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+        )
+        self._thread.start()
 
     def _build_conversation_context(self) -> str:
         """构建包含更多历史的消息上下文"""
@@ -51,18 +63,17 @@ class TopicSummaryTask(QRunnable):
         
         return "\n".join(lines)
 
-    @pyqtSlot()
-    def run(self):
+    def _run(self) -> None:
+        """执行摘要生成"""
         try:
             if not self.messages:
-                self.callback(
-                    {
-                        "topic_summary": "",
-                        "should_update_memory": False,
-                        "memory_content": "",
-                    }
-                )
+                self.callback({
+                    "topic_summary": "",
+                    "should_update_memory": False,
+                    "memory_content": "",
+                })
                 return
+            
             # 构建包含更多历史的消息上下文
             summary_text = self._build_conversation_context()
 
@@ -151,6 +162,7 @@ class TopicSummaryTask(QRunnable):
                     "}\n"
                     "```"
                 )
+            
             client = OpenAI(
                 api_key=self.llm_config.get("API_KEY", ""),
                 base_url=self.llm_config.get("API_URL"),
@@ -178,15 +190,27 @@ class TopicSummaryTask(QRunnable):
                 }
                 self.callback(callback_data)
             else:
-                self.callback(
-                    {
-                        "topic_summary": raw_response,
-                        "should_update_memory": False,
-                        "memory_content": "",
-                        "memory_category": "task_preference",
-                        "hit_memories": [],
-                    }
-                )
+                self.callback({
+                    "topic_summary": raw_response,
+                    "should_update_memory": False,
+                    "memory_content": "",
+                    "memory_category": "task_preference",
+                    "hit_memories": [],
+                })
         except Exception as e:
             logger.exception(f"[OpenAI] 获取标题失败: {e}")
-            self.callback(None, error=str(e))
+            # 适配错误回调格式
+            try:
+                self.callback({
+                    "topic_summary": "",
+                    "should_update_memory": False,
+                    "memory_content": "",
+                }, error=str(e))
+            except TypeError:
+                # 如果 callback 不支持 error 参数，只传一个参数
+                self.callback({
+                    "topic_summary": "",
+                    "should_update_memory": False,
+                    "memory_content": "",
+                    "error": str(e),
+                })

@@ -1,18 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 子智能体执行器 - 独立运行子智能体任务，避免共享超长上下文
+
+DEPRECATED: 使用 PyQt5.QtCore.QThread，已被 async_subagent_worker.py 替代
+请使用 AsyncSubAgentExecutor
 """
 
-import json
-import re
-import time
-from typing import Dict, List, Optional, Any, Callable
-
-from loguru import logger
-
-from app.tools.result import ToolResult
-from app.core.store import SubAgentLogStore
-
+# DEPRECATED: PyQt5 依赖 - 迁移到 async_subagent_worker.py
 from PyQt5.QtCore import QThread, pyqtSignal, QCoreApplication, QObject
 from openai import OpenAI
 
