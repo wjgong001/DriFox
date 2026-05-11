@@ -23,6 +23,7 @@ from app.core.provider_profile import (
 )
 from app.core.token_estimator import count_messages_tokens, estimate_tokens
 from app.core.workers import OpenAIChatWorker
+from app.core.workers.qt_signal_adapter import QtSignalAdapter
 from app.tools import get_builtin_tools_schema
 from app.utils.config import Settings
 
@@ -63,6 +64,16 @@ class ChatEngine:
             get_model_config=get_model_config,
             agent_manager=agent_manager,
         )
+        
+        # QtSignalAdapter：事件总线到 PyQt 信号的适配器（UI 模式使用）
+        self._qt_signal_adapter: Optional[QtSignalAdapter] = None
+    
+    @property
+    def event_bus(self) -> Any:
+        """获取当前 worker 的事件总线（如有）"""
+        if self._current_worker is not None:
+            return self._current_worker.event_bus
+        return None
 
     @property
     def compactor(self) -> 'HistoryCompactor':
@@ -446,20 +457,9 @@ class ChatEngine:
         if self._api_mode and self._worker_callbacks:
             self._current_worker.set_direct_callbacks(self._worker_callbacks)
         else:
-            # UI 模式：使用 Qt 信号-槽机制
-            self._current_worker.content_received.connect(self._on_content_received)
-            self._current_worker.reasoning_content_received.connect(self._on_reasoning_content_received)
-            self._current_worker.tool_call_started.connect(self._on_tool_call_started)
-            self._current_worker.tool_result_received.connect(self._on_tool_result_received)
-            self._current_worker.error_occurred.connect(self._on_error)
-            self._current_worker.finished_with_content.connect(self._on_worker_finished)
-            self._current_worker.finished_with_messages.connect(
-                self._on_worker_messages_updated
-            )
-            self._current_worker.question_asked.connect(self._on_question_asked)
-            self._current_worker.permission_approval_requested.connect(
-                self._on_permission_approval_requested
-            )
+            # UI 模式：使用 EventBus + QtSignalAdapter 机制
+            # 阶段3迁移：不再直接 connect PyQt Signal，改用适配器
+            self._setup_event_bus_adapter()
 
         self._current_worker.start()
         
@@ -471,6 +471,31 @@ class ChatEngine:
                 time.sleep(0.1)
                 self._emit("stream_started")
             threading.Thread(target=emit_later, daemon=True).start()
+
+    def _setup_event_bus_adapter(self):
+        """
+        设置事件总线适配器（UI 模式专用）
+        
+        阶段3迁移：不再直接 connect PyQt Signal，改用 QtSignalAdapter
+        将 WorkerEventBus 的事件转发为 PyQt 信号，供 UI 层订阅。
+        """
+        if self._current_worker is None:
+            return
+        
+        event_bus = self._current_worker.event_bus
+        if event_bus is None:
+            logger.warning("[ChatEngine] Worker has no event_bus")
+            return
+        
+        # 清理旧的适配器
+        if self._qt_signal_adapter is not None:
+            self._qt_signal_adapter.cleanup()
+        
+        # 创建新的适配器
+        self._qt_signal_adapter = QtSignalAdapter(event_bus, self._current_worker)
+        self._qt_signal_adapter.setup_ui_signals()
+        
+        logger.debug("[ChatEngine] EventBus adapter setup complete")
 
     def _on_content_received(self, content_piece: str):
         self._emit("content_received", content_piece)
@@ -511,6 +536,10 @@ class ChatEngine:
         self._is_streaming = False
         self._emit("error", error)
 
+    def _on_compaction_status_changed(self, status: dict):
+        """压缩状态变化处理（阶段1修复：之前遗漏了这个信号连接）"""
+        self._emit("compaction_status_changed", status)
+
     def stop(self) -> List[Dict]:
         
         worker = self._current_worker
@@ -541,6 +570,11 @@ class ChatEngine:
         清理当前 worker，释放所有缓存。
         应该在对话结束后或切换会话时调用。
         """
+        # 清理事件总线适配器
+        if self._qt_signal_adapter is not None:
+            self._qt_signal_adapter.cleanup()
+            self._qt_signal_adapter = None
+        
         worker = self._current_worker
         self._current_worker = None
         self._is_streaming = False

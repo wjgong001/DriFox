@@ -4,10 +4,13 @@ Worker 事件总线 - 统一的事件通知机制
 
 替代 PyQt Signal + direct_callback 双重模式。
 Worker 只发事件，调用方自行订阅。
+
+线程安全：所有操作都受 Lock 保护，支持多线程并发访问。
 """
 
 from dataclasses import dataclass
 from enum import Enum, auto
+import threading
 from typing import Callable, Dict, List, Any, Optional
 from loguru import logger
 
@@ -101,47 +104,57 @@ class CompactionPayload:
 
 
 class WorkerEventBus:
-    """Worker 事件总线 - 订阅/发布模式"""
+    """Worker 事件总线 - 订阅/发布模式（线程安全）
+    
+    所有操作都受 Lock 保护，支持多线程并发访问。
+    """
     
     def __init__(self):
         self._handlers: Dict[WorkerEvent, List[Callable]] = {}
+        self._lock = threading.RLock()  # 使用 RLock 支持重入
     
     def subscribe(self, event: WorkerEvent, handler: Callable) -> None:
-        """订阅事件
+        """订阅事件（线程安全）
         
         Args:
             event: 事件类型
             handler: 回调函数，签名取决于事件类型
         """
-        if event not in self._handlers:
-            self._handlers[event] = []
-        if handler not in self._handlers[event]:
-            self._handlers[event].append(handler)
+        with self._lock:
+            if event not in self._handlers:
+                self._handlers[event] = []
+            if handler not in self._handlers[event]:
+                self._handlers[event].append(handler)
     
     def unsubscribe(self, event: WorkerEvent, handler: Callable) -> None:
-        """取消订阅"""
-        if event in self._handlers and handler in self._handlers[event]:
-            self._handlers[event].remove(handler)
+        """取消订阅（线程安全）"""
+        with self._lock:
+            if event in self._handlers and handler in self._handlers[event]:
+                self._handlers[event].remove(handler)
     
     def emit(self, event: WorkerEvent, *args, **kwargs) -> None:
-        """广播事件到所有订阅者
+        """广播事件到所有订阅者（线程安全）
         
         Args:
             event: 事件类型
             *args, **kwargs: 事件数据，传递给所有 handler
         """
-        if event not in self._handlers:
-            return
-        for handler in self._handlers[event]:
+        # 先复制 handlers 列表，避免在迭代过程中被修改
+        with self._lock:
+            handlers = list(self._handlers.get(event, []))
+        
+        for handler in handlers:
             try:
                 handler(*args, **kwargs)
             except Exception as e:
                 logger.error(f"[EventBus] Handler error for {event.name}: {e}")
     
     def clear(self) -> None:
-        """清空所有订阅"""
-        self._handlers.clear()
+        """清空所有订阅（线程安全）"""
+        with self._lock:
+            self._handlers.clear()
     
     def has_subscribers(self, event: WorkerEvent) -> bool:
-        """检查是否有订阅者"""
-        return event in self._handlers and len(self._handlers[event]) > 0
+        """检查是否有订阅者（线程安全）"""
+        with self._lock:
+            return event in self._handlers and len(self._handlers[event]) > 0

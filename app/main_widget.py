@@ -4017,7 +4017,7 @@ class OpenAIChatToolWindow(ToolWindow):
         context_params = {}
 
         self.input_area.clear()
-        self._append_user_message(user_text, tag_params=context_params)
+        self._append_user_message(user_text)
 
         assistant_card = self._append_assistant_message()
 
