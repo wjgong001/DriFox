@@ -54,6 +54,12 @@ class ChatBackend(QObject):
     # 错误
     error_occurred = pyqtSignal(str)
     
+    # 任务相关
+    task_started = pyqtSignal(str, str)  # task_id, task_name
+    task_completed = pyqtSignal(str, str)  # task_id, task_name
+    task_failed = pyqtSignal(str, str, str)  # task_id, task_name, error
+    task_progress = pyqtSignal(str, str, str)  # task_id, task_name, message
+    
     # 上下文
     context_updated = pyqtSignal(int, int)  # token_count, limit
     
@@ -70,6 +76,7 @@ class ChatBackend(QObject):
         self._sub_agent_manager = None
         self._session_store = None
         self._history_manager = None
+        self._task_watcher = None
         
         # 配置回调
         self._get_model_config: Optional[Callable] = None
@@ -121,6 +128,11 @@ class ChatBackend(QObject):
     @property
     def history_manager(self):
         return self._history_manager
+
+    @property
+    def task_watcher(self):
+        """获取任务观察者系统"""
+        return self._task_watcher
     
     # ========== 初始化 ==========
     
@@ -227,6 +239,9 @@ class ChatBackend(QObject):
 
         self._history_manager = HistoryManager()
         
+        # 6. 初始化 TaskWatcher（跳过 ChatEngine/SessionManager）
+        self._init_task_watcher(get_model_config)
+        
         self._initialized = True
         logger.info("[ChatBackend] 初始化完成")
     
@@ -297,6 +312,55 @@ class ChatBackend(QObject):
         self._sub_agent_manager = manager
         if self._tool_executor:
             self._tool_executor.set_sub_agent_manager(manager)
+    
+    # ========== 任务系统 ==========
+    
+    def _init_task_watcher(self, get_model_config: Callable):
+        """初始化任务观察者系统"""
+        try:
+            from app.core.task_watcher import TaskWatcherSystem
+            self._task_watcher = TaskWatcherSystem(
+                get_model_config=get_model_config,
+                tool_executor=self._tool_executor,
+            )
+            self._task_watcher.set_callback('task_started', self._on_task_started)
+            self._task_watcher.set_callback('task_completed', self._on_task_completed)
+            self._task_watcher.set_callback('task_failed', self._on_task_failed)
+            self._task_watcher.set_callback('task_progress', self._on_task_progress)
+            self._task_watcher.start()
+            logger.info("[ChatBackend] TaskWatcher 初始化完成")
+        except Exception as e:
+            logger.error(f"[ChatBackend] TaskWatcher 初始化失败: {e}")
+    
+    def _on_task_started(self, task_id: str, task_name: str):
+        self.task_started.emit(task_id, task_name)
+    
+    def _on_task_completed(self, task_id: str, task_name: str):
+        self.task_completed.emit(task_id, task_name)
+    
+    def _on_task_failed(self, task_id: str, task_name: str, error: str):
+        self.task_failed.emit(task_id, task_name, error)
+    
+    def _on_task_progress(self, task_id: str, task_name: str, message: str):
+        self.task_progress.emit(task_id, task_name, message)
+    
+    def execute_task(self, config) -> str:
+        """手动执行任务"""
+        if self._task_watcher:
+            return self._task_watcher.execute_task(config)
+        return ""
+    
+    def get_registered_tasks(self) -> List[Dict]:
+        """获取已注册的任务列表"""
+        if self._task_watcher:
+            return self._task_watcher.get_registered_tasks()
+        return []
+    
+    def get_execution_results(self, limit: int = 50) -> List[Dict]:
+        """获取执行结果"""
+        if self._task_watcher:
+            return self._task_watcher.get_execution_results(limit)
+        return []
     
     def reset_session_state(self):
         """重置会话状态"""

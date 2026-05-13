@@ -2,42 +2,43 @@
 """
 TaskExecutor - 任务执行器
 
-使用纯文件化架构，不依赖数据库：
-- 结果写入文件: conversation.md, result.md, error.log
-- 复用 ChatEngine，但不保存会话到数据库
+使用 ChatWorker 直接执行 LLM 任务（QThread 信号驱动，无需等待）
+- 跳过 ChatEngine/SessionManager
+- 结果写入文件
 """
 import time
 import threading
-from datetime import datetime
 from typing import Optional, Callable, Dict, Any, List
 
 from loguru import logger
-from .models import TaskConfig, TaskResult
+from .models import TaskConfig
 from .file_manager import TaskFileManager
 
 
 class TaskExecutor:
     """
     任务执行器
-    
-    纯文件化架构：
-    - 结果统一写入文件
-    - 不保存会话到数据库
-    - 复用 ChatEngine
     """
 
-    def __init__(self):
+    def __init__(self, get_model_config: Optional[Callable] = None,
+                 tool_executor: Optional[Any] = None):
         self._file_manager = TaskFileManager.get_instance()
         self._callbacks: Dict[str, Callable] = {}
         self._running_tasks: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._get_model_config = get_model_config
+        self._tool_executor = tool_executor
+
+    def set_model_config_provider(self, provider: Callable):
+        self._get_model_config = provider
+
+    def set_tool_executor(self, executor):
+        self._tool_executor = executor
 
     def set_callback(self, event: str, callback: Callable) -> None:
-        """设置任务事件回调"""
         self._callbacks[event] = callback
 
     def _emit(self, event: str, *args) -> None:
-        """触发事件"""
         callback = self._callbacks.get(event)
         if callback:
             try:
@@ -46,190 +47,124 @@ class TaskExecutor:
                 logger.error(f"[TaskExecutor] 回调错误: {e}")
 
     def execute(self, config: TaskConfig) -> str:
-        """
-        执行任务
-        
-        创建结果目录，但不阻塞执行。
-        实际的执行逻辑由外部（如 TaskExecutionEngine）完成。
-        
-        Args:
-            config: 任务配置
-            
-        Returns:
-            result_dir: 结果文件夹路径
-        """
-        # 创建结果文件夹
+        """执行任务 - 直接创建 ChatWorker（QThread，自带事件循环）"""
         result_dir = self._file_manager.create_result_dir(config.name)
 
-        # 保存任务上下文
         ctx = {
             'config': config,
             'result_dir': result_dir,
             'start_time': time.time(),
-            'conversation_lines': [],
             'status': 'running',
+            'result_text': '',
         }
 
         with self._lock:
             self._running_tasks[config.id] = ctx
 
-        logger.info(f"[TaskExecutor] 创建任务执行上下文: {config.name}, result_dir={result_dir}")
-        self._emit('task_started', config.id, config.name, config.name)
+        logger.info(f"[TaskExecutor] 开始执行: {config.name}, result_dir={result_dir}")
+        self._emit('task_started', config.id, config.name)
+
+        task_content = config.content or "(无内容)"
+        self._file_manager.write_conversation(
+            result_dir, config.name, task_content,
+            [f"## 用户\n\n{task_content}\n"]
+        )
+
+        llm_config = self._get_model_config() if self._get_model_config else {}
+        if not llm_config or not llm_config.get("API_KEY"):
+            # 无模型配置，模拟执行
+            self._start_simulated(config, result_dir)
+        else:
+            self._start_worker(config, task_content, llm_config, result_dir)
 
         return result_dir
 
-    def append_conversation(self, task_id: str, role: str, content: str) -> None:
-        """
-        追加对话内容（实时写入）
-        
-        Args:
-            task_id: 任务ID
-            role: 角色 (user/assistant/system)
-            content: 对话内容
-        """
-        with self._lock:
-            if task_id not in self._running_tasks:
-                return
+    def _start_simulated(self, config: TaskConfig, result_dir: str):
+        """模拟执行（无模型配置时）"""
+        import threading as _t
+        def run():
+            _t.current_thread().name = f"task-sim-{config.id[:8]}"
+            _t.sleep(2)
+            result_text = f"# {config.name}\n\n任务已执行完成。\n\n## 任务内容\n\n{config.content or '(无内容)'}\n"
+            self._file_manager.write_result(result_dir, config.name, result_text, 'completed')
+            ctx = self._running_tasks.get(config.id)
+            elapsed = time.time() - ctx['start_time'] if ctx else 0
+            logger.info(f"[TaskExecutor] 完成(模拟): {config.name}, 耗时: {elapsed:.1f}s")
+            self._emit('task_completed', config.id, config.name)
+            with self._lock:
+                if config.id in self._running_tasks:
+                    del self._running_tasks[config.id]
+        _t.Thread(target=run, daemon=True).start()
 
-            ctx = self._running_tasks[task_id]
-            ctx['conversation_lines'].append(f"## {role.capitalize()}\n\n{content}")
+    def _start_worker(self, config: TaskConfig, task_content: str,
+                      llm_config: Dict, result_dir: str):
+        """使用 OpenAI API 同步调用（后台线程直接执行）"""
+        import threading as _t
 
-        # 实时写入文件
-        self._write_conversation_file(task_id)
+        def run():
+            _t.current_thread().name = f"task-llm-{config.id[:8]}"
+            try:
+                self._emit('task_progress', config.id, config.name, "连接模型中...")
 
-    def _write_conversation_file(self, task_id: str) -> None:
-        """写入对话记录文件"""
-        with self._lock:
-            if task_id not in self._running_tasks:
-                return
-            ctx = self._running_tasks[task_id]
+                from openai import OpenAI
+                client = OpenAI(
+                    api_key=llm_config.get("API_KEY", ""),
+                    base_url=llm_config.get("API_URL", ""),
+                )
+                model = llm_config.get("模型名称", "gpt-4o-mini")
 
-        # 获取任务内容
-        task_content = getattr(ctx['config'], 'content', '') or ''
-        if hasattr(ctx['config'], 'name'):
-            task_name = ctx['config'].name
-        else:
-            task_name = '未知任务'
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": task_content}],
+                    stream=True,
+                    timeout=300,
+                )
 
-        self._file_manager.write_conversation(
-            ctx['result_dir'],
-            task_name,
-            task_content,
-            ctx['conversation_lines']
-        )
+                collected = []
+                for chunk in response:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        text = chunk.choices[0].delta.content
+                        collected.append(text)
+                        msg = ''.join(collected[-20:])
+                        self._emit('task_progress', config.id, config.name, msg[:120])
+                        self._file_manager.append_conversation(result_dir, "assistant", text)
 
-    def complete(self, task_id: str, result: str) -> None:
-        """
-        任务完成
-        
-        Args:
-            task_id: 任务ID
-            result: 执行结果
-        """
-        with self._lock:
-            if task_id not in self._running_tasks:
-                logger.warning(f"[TaskExecutor] 任务不存在: {task_id}")
-                return
+                result = ''.join(collected)
+                self._file_manager.write_result(result_dir, config.name, result, 'completed')
+                ctx = self._running_tasks.get(config.id)
+                elapsed = time.time() - ctx['start_time'] if ctx else 0
+                logger.info(f"[TaskExecutor] 完成: {config.name}, 耗时: {elapsed:.1f}s")
+                self._emit('task_completed', config.id, config.name)
 
-            ctx = self._running_tasks[task_id]
-            task_name = ctx['config'].name
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"[TaskExecutor] 失败: {config.name}, error={error_msg}")
+                self._file_manager.write_error(result_dir, config.name, error_msg)
+                self._emit('task_failed', config.id, config.name, error_msg)
+            finally:
+                with self._lock:
+                    if config.id in self._running_tasks:
+                        del self._running_tasks[config.id]
 
-        # 写入最终结果
-        self._file_manager.write_result(ctx['result_dir'], task_name, result, 'completed')
-
-        # 计算执行时间
-        elapsed = time.time() - ctx['start_time']
-
-        logger.info(f"[TaskExecutor] 任务完成: {task_name}, 耗时: {elapsed:.1f}s")
-
-        # 清理
-        with self._lock:
-            del self._running_tasks[task_id]
-
-        self._emit('task_completed', task_id, task_name, result)
-
-    def fail(self, task_id: str, error: str) -> None:
-        """
-        任务失败
-        
-        Args:
-            task_id: 任务ID
-            error: 错误信息
-        """
-        with self._lock:
-            if task_id not in self._running_tasks:
-                logger.warning(f"[TaskExecutor] 任务不存在: {task_id}")
-                return
-
-            ctx = self._running_tasks[task_id]
-            task_name = ctx['config'].name
-
-        # 写入错误日志
-        self._file_manager.write_error(ctx['result_dir'], task_name, error)
-
-        elapsed = time.time() - ctx['start_time']
-
-        logger.error(f"[TaskExecutor] 任务失败: {task_name}, 耗时: {elapsed:.1f}s, error={error}")
-
-        # 清理
-        with self._lock:
-            del self._running_tasks[task_id]
-
-        self._emit('task_failed', task_id, task_name, error)
+        _t.Thread(target=run, daemon=True, name=f"task-{config.id[:8]}").start()
 
     def get_running_tasks(self) -> Dict[str, Dict[str, Any]]:
-        """获取运行中的任务"""
         with self._lock:
             return self._running_tasks.copy()
 
     def is_running(self, task_id: str) -> bool:
-        """检查任务是否运行中"""
         with self._lock:
             return task_id in self._running_tasks
 
-    def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """获取任务状态"""
-        with self._lock:
-            ctx = self._running_tasks.get(task_id)
-            if not ctx:
-                return None
-
-            return {
-                'task_id': task_id,
-                'task_name': ctx['config'].name,
-                'result_dir': ctx['result_dir'],
-                'status': ctx['status'],
-                'elapsed': time.time() - ctx['start_time'],
-            }
-
     def cancel_task(self, task_id: str) -> bool:
-        """
-        取消任务
-        
-        Args:
-            task_id: 任务ID
-            
-        Returns:
-            是否成功
-        """
         with self._lock:
             if task_id not in self._running_tasks:
                 return False
-
             ctx = self._running_tasks[task_id]
             task_name = ctx['config'].name
-
-        # 写入取消标记
-        self._file_manager.write_error(
-            ctx['result_dir'],
-            task_name,
-            "任务被用户取消"
-        )
-
+        self._file_manager.write_error(ctx['result_dir'], task_name, "任务被取消")
         with self._lock:
             del self._running_tasks[task_id]
-
-        logger.info(f"[TaskExecutor] 任务已取消: {task_name}")
+        logger.info(f"[TaskExecutor] 已取消: {task_name}")
         self._emit('task_cancelled', task_id, task_name)
-
         return True

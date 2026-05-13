@@ -809,6 +809,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._task_floating_widget = TaskFloatingWidget(self)
         self._task_floating_widget.setVisible(False)
         self._task_floating_widget.set_open_folder_handler(self._on_task_open_folder)
+        self._task_floating_widget.execute_requested.connect(self._on_task_execute_requested)
         layout.addWidget(self._task_floating_widget)
 
         self._sub_agent_floating_widget = SubAgentFloatingWidget(self)
@@ -1475,32 +1476,36 @@ class OpenAIChatToolWindow(ToolWindow):
     # ==================== 任务面板 ====================
 
     def _init_task_system(self):
-        """初始化任务系统"""
-        try:
-            from app.core.task_watcher import TaskWatcherSystem
-            self._task_watcher = TaskWatcherSystem.get_instance(self)
-            self._task_watcher.set_callback('task_started', self._on_task_started)
-            self._task_watcher.set_callback('task_completed', self._on_task_completed)
-            self._task_watcher.set_callback('task_failed', self._on_task_failed)
-            self._task_watcher.start()
-            logger.info("[TaskPanel] 任务系统初始化完成")
-        except Exception as e:
-            logger.error(f"[TaskPanel] 任务系统初始化失败: {e}")
+        """连接任务系统信号（任务系统已由后端管理）"""
+        if not hasattr(self.backend, 'task_watcher') or not self.backend.task_watcher:
+            return
+        
+        self.backend.task_started.connect(self._on_task_started)
+        self.backend.task_completed.connect(self._on_task_completed)
+        self.backend.task_failed.connect(self._on_task_failed)
+        self.backend.task_progress.connect(self._on_task_progress)
+        logger.info("[TaskPanel] 任务信号连接完成")
 
     def _on_task_started(self, task_id: str, task_name: str):
-        """任务开始"""
-        self._task_floating_widget.add_task(task_id, task_name, 'running')
+        """任务开始 - 更新已有任务状态"""
+        self._task_floating_widget.update_status(task_id, 'running')
         self._update_task_button()
 
     def _on_task_completed(self, task_id: str, task_name: str):
         """任务完成"""
-        self._task_floating_widget.update_task_status(task_id, 'completed')
+        self._task_floating_widget.update_status(task_id, 'completed')
+        # 刷新面板显示最新结果
+        self._refresh_task_panel()
         self._update_task_button()
 
-    def _on_task_failed(self, task_id: str, task_name: str, error: str):
+    def _on_task_failed(self, task_id: str, task_name: str, error: str = ""):
         """任务失败"""
-        self._task_floating_widget.update_task_status(task_id, 'failed')
+        self._task_floating_widget.update_status(task_id, 'failed')
         self._update_task_button()
+
+    def _on_task_progress(self, task_id: str, task_name: str, message: str):
+        """任务进度"""
+        self._task_floating_widget.update_progress(task_id, message)
 
     def _toggle_task_panel(self):
         """切换任务面板显示"""
@@ -1513,18 +1518,18 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _refresh_task_panel(self):
         """刷新任务面板"""
-        if hasattr(self, '_task_watcher') and self._task_watcher:
-            tasks = self._task_watcher.get_registered_tasks()
-            results = self._task_watcher.get_execution_results(limit=10)
-            self._task_floating_widget.load_tasks(tasks, results)
+        if hasattr(self.backend, 'task_watcher') and self.backend.task_watcher:
+            tasks = self.backend.get_registered_tasks()
+            results = self.backend.get_execution_results(limit=10)
+            self._task_floating_widget.load(tasks, results)
         self._update_task_button()
 
     def _update_task_button(self):
         """更新任务按钮状态"""
-        if not hasattr(self, '_task_watcher') or not self._task_watcher:
+        if not hasattr(self.backend, 'task_watcher') or not self.backend.task_watcher:
             return
 
-        running_tasks = self._task_watcher.get_running_tasks()
+        running_tasks = self.backend.task_watcher.get_running_tasks()
         count = len(running_tasks)
 
         if count > 0:
@@ -1534,11 +1539,22 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_task_open_folder(self):
         """打开任务文件夹"""
-        if hasattr(self, '_task_watcher') and self._task_watcher:
-            import os
-            tasks_dir = self._task_watcher.file_manager.tasks_dir
+        import os
+        if hasattr(self.backend, 'task_watcher') and self.backend.task_watcher:
+            tasks_dir = self.backend.task_watcher.file_manager.config_dir
             if os.path.exists(tasks_dir):
                 os.startfile(tasks_dir)
+
+    def _on_task_execute_requested(self, task_id: str, task_name: str, file_path: str = ""):
+        """手动执行任务请求"""
+        if not hasattr(self.backend, 'task_watcher') or not self.backend.task_watcher:
+            return
+
+        from app.core.task_watcher import TaskParser
+        parser = TaskParser()
+        config = parser.parse_file(file_path)
+        if config:
+            self.backend.execute_task(config)
 
     def _toggle_history_card(self):
         """切换历史会话卡片的显示"""

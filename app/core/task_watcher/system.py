@@ -32,16 +32,18 @@ class TaskWatcherSystem:
     _instance: Optional["TaskWatcherSystem"] = None
     _lock = threading.Lock()
 
-    def __init__(self, main_widget=None):
+    def __init__(self,
+                 get_model_config: Optional[Callable] = None,
+                 tool_executor: Optional[Any] = None):
         """
         初始化 TaskWatcher 系统
         
         Args:
-            main_widget: UI 主窗口（可选）
+            get_model_config: 获取模型配置的回调
+            tool_executor: 工具执行器
         """
-        self._main_widget = main_widget
         self._file_manager = TaskFileManager.get_instance()
-        self._executor = TaskExecutor()
+        self._executor = TaskExecutor(get_model_config, tool_executor)
         self._parser = TaskParser()
         self._watcher = TaskWatcher(self._file_manager)
 
@@ -53,12 +55,13 @@ class TaskWatcherSystem:
         self._setup_callbacks()
 
     @classmethod
-    def get_instance(cls, main_widget=None) -> "TaskWatcherSystem":
+    def get_instance(cls, get_model_config=None,
+                     tool_executor=None) -> "TaskWatcherSystem":
         """获取全局单例"""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
-                    cls._instance = cls(main_widget)
+                    cls._instance = cls(get_model_config, tool_executor)
         return cls._instance
 
     @classmethod
@@ -77,6 +80,7 @@ class TaskWatcherSystem:
         self._executor.set_callback('task_started', self._on_task_started)
         self._executor.set_callback('task_completed', self._on_task_completed)
         self._executor.set_callback('task_failed', self._on_task_failed)
+        self._executor.set_callback('task_progress', self._on_task_progress)
 
     # ==================== 生命周期 ====================
 
@@ -112,12 +116,12 @@ class TaskWatcherSystem:
         logger.info(f"[TaskWatcherSystem] 检测到任务文件: {config.name}")
         self._emit('task_discovered', config)
 
-    def _on_task_started(self, task_id: str, task_name: str, description: str) -> None:
+    def _on_task_started(self, task_id: str, task_name: str) -> None:
         """任务开始"""
         logger.info(f"[TaskWatcherSystem] 任务开始: {task_name}")
         self._emit('task_started', task_id, task_name)
 
-    def _on_task_completed(self, task_id: str, task_name: str, result: str) -> None:
+    def _on_task_completed(self, task_id: str, task_name: str) -> None:
         """任务完成"""
         logger.info(f"[TaskWatcherSystem] 任务完成: {task_name}")
         self._emit('task_completed', task_id, task_name)
@@ -126,6 +130,10 @@ class TaskWatcherSystem:
         """任务失败"""
         logger.error(f"[TaskWatcherSystem] 任务失败: {task_name}, error={error}")
         self._emit('task_failed', task_id, task_name, error)
+
+    def _on_task_progress(self, task_id: str, task_name: str, message: str) -> None:
+        """任务进度"""
+        self._emit('task_progress', task_id, task_name, message)
 
     # ==================== 公开接口 ====================
 
@@ -163,15 +171,18 @@ class TaskWatcherSystem:
             任务列表
         """
         task_files = self._file_manager.get_task_files()
-        return [
-            {
-                'id': f.path,
+        result = []
+        for f in task_files:
+            # 尝试读取任务的内部 ID，失败则用文件路径
+            config = self._parser.parse_file(f.path)
+            task_id = config.id if config else f.path
+            result.append({
+                'id': task_id,
                 'name': f.task_name,
                 'path': f.path,
                 'trigger_mode': f.trigger_mode,
-            }
-            for f in task_files
-        ]
+            })
+        return result
 
     def get_execution_results(self, limit: int = 50) -> List[Dict[str, Any]]:
         """

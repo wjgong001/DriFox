@@ -202,6 +202,20 @@ class ItemStyles:
     """列表项样式模板"""
     
     @staticmethod
+    def list_item() -> str:
+        """列表项样式"""
+        return """
+            QFrame {
+                background-color: rgba(255, 255, 255, 0.04);
+                border-radius: 8px;
+                margin: 2px 0;
+            }
+            QFrame:hover {
+                background-color: rgba(255, 255, 255, 0.08);
+            }
+        """
+    
+    @staticmethod
     def radio_button() -> str:
         """单选按钮样式"""
         return """
