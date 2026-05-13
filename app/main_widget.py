@@ -103,6 +103,9 @@ from app.widgets.todo_floating_widget import (
 from app.widgets.tool_floating_widget import (
     ToolFloatingWidget,
 )
+from app.widgets.task_floating_widget import (
+    TaskFloatingWidget,
+)
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import add_message_to_layout, refresh_history_card_if_visible, \
     init_new_session_after_archive, clear_and_show_welcome, refresh_session_view, save_or_archive_session, \
@@ -167,6 +170,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 调用父类（会触发 setup_ui -> _create_agent_switch_buttons）
         super().__init__(homepage, button)
+
+        # 初始化任务系统
+        self._init_task_system()
+
         self._session_card_cache: Dict[str, Dict[str, Any]] = {}
         self._current_history_project: Optional[str] = None  # 当前历史面板项目过滤
         self._welcome_card_cache: Dict[str, MessageCard] = {}
@@ -798,6 +805,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._todo_floating_widget.setVisible(False)
         layout.addWidget(self._todo_floating_widget)
 
+        # 任务面板
+        self._task_floating_widget = TaskFloatingWidget(self)
+        self._task_floating_widget.setVisible(False)
+        self._task_floating_widget.set_open_folder_handler(self._on_task_open_folder)
+        layout.addWidget(self._task_floating_widget)
+
         self._sub_agent_floating_widget = SubAgentFloatingWidget(self)
         self._sub_agent_floating_widget.setVisible(False)
 
@@ -842,6 +855,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         layout.addWidget(self.chat_scroll_area, 1)
 
+        layout.addWidget(self._task_floating_widget)
         layout.addWidget(self._sub_agent_floating_widget)
         layout.addWidget(self._tool_floating_widget)
 
@@ -983,6 +997,24 @@ class OpenAIChatToolWindow(ToolWindow):
         self.memory_btn.setToolTip("长期记忆管理")
         self.memory_btn.clicked.connect(self._show_soul_memory)
         capsule_layout.addWidget(self.memory_btn)
+
+        # 任务按钮
+        self.task_btn = QPushButton("📋0")
+        self.task_btn.setFixedSize(36, 26)
+        self.task_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,10%);
+                border: 1px solid rgba(255,255,255,20%);
+                border-radius: 4px;
+                color: #ccc;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: rgba(255,255,255,20%);
+            }
+        """)
+        self.task_btn.clicked.connect(self._toggle_task_panel)
+        capsule_layout.addWidget(self.task_btn)
 
         # 历史按钮
         self.history_btn = TransparentToolButton(FluentIcon.HISTORY, self._toolbar_capsule)
@@ -1439,6 +1471,74 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 触发智能体切换
         self._on_agent_changed(agent_name)
+
+    # ==================== 任务面板 ====================
+
+    def _init_task_system(self):
+        """初始化任务系统"""
+        try:
+            from app.core.task_watcher import TaskWatcherSystem
+            self._task_watcher = TaskWatcherSystem.get_instance(self)
+            self._task_watcher.set_callback('task_started', self._on_task_started)
+            self._task_watcher.set_callback('task_completed', self._on_task_completed)
+            self._task_watcher.set_callback('task_failed', self._on_task_failed)
+            self._task_watcher.start()
+            logger.info("[TaskPanel] 任务系统初始化完成")
+        except Exception as e:
+            logger.error(f"[TaskPanel] 任务系统初始化失败: {e}")
+
+    def _on_task_started(self, task_id: str, task_name: str):
+        """任务开始"""
+        self._task_floating_widget.add_task(task_id, task_name, 'running')
+        self._update_task_button()
+
+    def _on_task_completed(self, task_id: str, task_name: str):
+        """任务完成"""
+        self._task_floating_widget.update_task_status(task_id, 'completed')
+        self._update_task_button()
+
+    def _on_task_failed(self, task_id: str, task_name: str, error: str):
+        """任务失败"""
+        self._task_floating_widget.update_task_status(task_id, 'failed')
+        self._update_task_button()
+
+    def _toggle_task_panel(self):
+        """切换任务面板显示"""
+        if self._task_floating_widget.isVisible():
+            self._task_floating_widget.setVisible(False)
+        else:
+            self._hide_main_popups()
+            self._refresh_task_panel()
+            self._task_floating_widget.setVisible(True)
+
+    def _refresh_task_panel(self):
+        """刷新任务面板"""
+        if hasattr(self, '_task_watcher') and self._task_watcher:
+            tasks = self._task_watcher.get_registered_tasks()
+            results = self._task_watcher.get_execution_results(limit=10)
+            self._task_floating_widget.load_tasks(tasks, results)
+        self._update_task_button()
+
+    def _update_task_button(self):
+        """更新任务按钮状态"""
+        if not hasattr(self, '_task_watcher') or not self._task_watcher:
+            return
+
+        running_tasks = self._task_watcher.get_running_tasks()
+        count = len(running_tasks)
+
+        if count > 0:
+            self.task_btn.setText(f"⚙️{count}")
+        else:
+            self.task_btn.setText("📋0")
+
+    def _on_task_open_folder(self):
+        """打开任务文件夹"""
+        if hasattr(self, '_task_watcher') and self._task_watcher:
+            import os
+            tasks_dir = self._task_watcher.file_manager.tasks_dir
+            if os.path.exists(tasks_dir):
+                os.startfile(tasks_dir)
 
     def _toggle_history_card(self):
         """切换历史会话卡片的显示"""

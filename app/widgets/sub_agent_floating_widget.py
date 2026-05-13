@@ -44,8 +44,13 @@ class SubTaskLogWidget(QFrame):
         self._start_time = time.time() - elapsed_seconds
 
     def mark_finished(self):
-        """标记任务已完成，停止时间更新"""
+        """标记任务已完成，停止时间更新并设置最终时间"""
         self._is_finished = True
+        # 计算并设置最终时间显示
+        elapsed = int(time.time() - self._start_time)
+        mins = elapsed // 60
+        secs = elapsed % 60
+        self.time_label.setText(f"{mins:02d}:{secs:02d}")
 
     def _setup_ui(self):
         self.setStyleSheet("""
@@ -190,9 +195,11 @@ class SubTaskLogWidget(QFrame):
     def finish_task(self, result: str = None, success: bool = True):
         """完成任务"""
         self._is_finished = True
+        # 直接计算并设置最终时间，而不是依赖定时器
         elapsed = int(time.time() - self._start_time)
         mins = elapsed // 60
         secs = elapsed % 60
+        self.time_label.setText(f"{mins:02d}:{secs:02d}")
 
         if success:
             self.status_icon.setText("✅")

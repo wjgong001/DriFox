@@ -16,6 +16,7 @@ from app.widgets.tool_floating_widget import ToolFloatingWidget
 from app.widgets.sub_agent_floating_widget import SubAgentFloatingWidget
 from app.widgets.todo_floating_widget import TodoFloatingWidget
 from app.widgets.question_floating_widget import QuestionFloatingWidget
+from app.widgets.task_floating_widget import TaskFloatingWidget
 
 # 对话组件
 from app.widgets.bottom_input_area import SendableTextEdit
@@ -42,6 +43,7 @@ __all__ = [
     "SubAgentFloatingWidget",
     "TodoFloatingWidget",
     "QuestionFloatingWidget",
+    "TaskFloatingWidget",
     # 对话组件
     "SendableTextEdit",
     "ContextUsageRing",

@@ -140,13 +140,21 @@ class TaskWatcher:
     使用 watchdog 监控文件夹变化
     """
 
-    def __init__(self, config_store: Optional[Any] = None):
+    def __init__(self, config_store=None):
         """初始化任务监听器
         
         Args:
-            config_store: TaskConfigStore 实例（用于获取监听配置）
+            config_store: 可选，为保持向后兼容
         """
         self._config_store = config_store
+        
+        # 获取任务目录
+        if config_store and hasattr(config_store, 'tasks_dir'):
+            self._tasks_dir = config_store.tasks_dir
+        else:
+            from app.core.task_watcher.file_manager import TaskFileManager
+            self._tasks_dir = TaskFileManager.get_instance().config_dir
+        
         self._observer: Optional[Observer] = None
         self._handlers: Dict[str, TaskFileHandler] = {}
         self._watch_folders: Dict[str, str] = {}  # folder -> pattern

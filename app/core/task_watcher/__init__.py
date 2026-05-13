@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 TaskWatcher 自动任务触发系统
+
+纯文件化架构：
+- 任务配置: *.task.md 文件
+- 执行结果: 任务名_时间_uuid/ 文件夹
+- 不使用数据库
+
 文件夹监听 + 定时任务 + 自动执行的 LLM 任务编排系统
 """
 from .models import (
@@ -20,15 +26,14 @@ from .models import (
     TaskResult,
 )
 from .parser import TaskParser, TaskParseError
-from .database import Database
-from .config_store import TaskConfigStore
-from .queue import TaskQueue
+
+# 文件管理（核心组件）
+from .file_manager import TaskFileManager, TaskFileInfo, ExecutionResult, TASKS_FOLDER, RESULTS_FOLDER, CONFIG_FOLDER
+
+# 执行器
 from .executor import TaskExecutor
-from .watcher import TaskWatcher, TaskFileHandler
-from .scheduler import TaskScheduler
-from .output_handler import OutputHandler
-from .engine_scheduler import EngineScheduler, get_engine_scheduler, EngineInfo
-from .task_execution_engine import TaskExecutionEngine, get_task_execution_engine
+
+# 系统
 from .system import TaskWatcherSystem
 
 __all__ = [
@@ -50,23 +55,16 @@ __all__ = [
     # 解析器
     "TaskParser",
     "TaskParseError",
-    # 数据库
-    "Database",
-    # 组件
-    "TaskConfigStore",
-    "TaskQueue",
+    # 文件管理
+    "TaskFileManager",
+    "TaskFileInfo",
+    "ExecutionResult",
+    "TASKS_FOLDER",
+    "RESULTS_FOLDER",
+    "CONFIG_FOLDER",
+    # 执行器
     "TaskExecutor",
-    "TaskWatcher",
-    "TaskFileHandler",
-    "TaskScheduler",
-    "OutputHandler",
-    "EngineScheduler",
-    "EngineInfo",
-    "get_engine_scheduler",
-    # 任务执行引擎（使用独立环境）
-    "TaskExecutionEngine",
-    "get_task_execution_engine",
     # 系统
     "TaskWatcherSystem",
 ]
-__version__ = "1.2.0"
+__version__ = "2.0.0"
